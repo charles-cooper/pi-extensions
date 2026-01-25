@@ -35,6 +35,7 @@ interface SubagentResult {
 	usage: UsageStats;
 	stopReason?: string;
 	errorMessage?: string;
+	availableModels?: string[];
 }
 
 function formatTokens(n: number): string {
@@ -215,18 +216,13 @@ async function runSubagent(
 }
 
 export default function (pi: ExtensionAPI) {
-	const getModelList = (ctx: ExtensionContext) => {
-		const models = getAvailableModels(ctx);
-		return [...models.keys()].join(", ");
-	};
-
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
 		description:
-			"Spawn a subagent with isolated context. Params: model (full model ID), task (instruction), context (optional XML), tools (optional array).",
+			"Spawn a subagent with isolated context. Params: model (full model ID from available models), task (instruction), context (optional XML), tools (optional array).",
 		parameters: Type.Object({
-			model: Type.String({ description: "Full model ID (e.g. claude-sonnet-4-20250514, gpt-4o-mini)" }),
+			model: Type.String({ description: "Full model ID from available models list" }),
 			task: Type.String({ description: "The task instruction for the subagent" }),
 			context: Type.Optional(Type.String({ description: "Optional XML-structured context to pass" })),
 			tools: Type.Optional(Type.Array(Type.String(), { description: "Tool names to enable (default: all)" })),
@@ -263,6 +259,7 @@ export default function (pi: ExtensionAPI) {
 			);
 
 			const isError = result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
+			result.availableModels = [...models.keys()];
 
 			return {
 				content: [{ type: "text", text: result.output || result.errorMessage || "(no output)" }],
