@@ -74,22 +74,22 @@ function formatToolCall(name: string, args: Record<string, unknown>, themeFg: (c
 		return p.startsWith(home) ? `~${p.slice(home.length)}` : p;
 	};
 
-	switch (name) {
-		case "Bash": {
+	switch (name.toLowerCase()) {
+		case "bash": {
 			const cmd = (args.command as string) || "...";
 			const preview = cmd.length > 60 ? `${cmd.slice(0, 60)}...` : cmd;
 			return themeFg("muted", "$ ") + themeFg("toolOutput", preview);
 		}
-		case "Read": {
-			const filePath = shortenPath((args.path || "...") as string);
+		case "read": {
+			const filePath = shortenPath((args.path || args.file_path || "...") as string);
 			return themeFg("muted", "read ") + themeFg("accent", filePath);
 		}
-		case "Write": {
-			const filePath = shortenPath((args.path || "...") as string);
+		case "write": {
+			const filePath = shortenPath((args.path || args.file_path || "...") as string);
 			return themeFg("muted", "write ") + themeFg("accent", filePath);
 		}
-		case "Edit": {
-			const filePath = shortenPath((args.path || "...") as string);
+		case "edit": {
+			const filePath = shortenPath((args.path || args.file_path || "...") as string);
 			return themeFg("muted", "edit ") + themeFg("accent", filePath);
 		}
 		default: {
