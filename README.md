@@ -4,7 +4,7 @@ Personal extensions for [pi coding agent](https://github.com/mariozechner/pi-mon
 
 ## Extensions
 
-### subagent.ts
+### extensions/subagent.ts
 
 Spawn subagents with isolated context. The LLM can delegate tasks to other models.
 
@@ -19,4 +19,4 @@ Features:
 ./install.sh
 ```
 
-Copies extensions to `~/.pi/agent/extensions/`.
+Copies all `extensions/*.ts` to `~/.pi/agent/extensions/`.

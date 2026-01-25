@@ -1,7 +1,7 @@
 #!/bin/bash
-# Install subagent extension to pi
+# Install extensions to pi
 
 DEST="$HOME/.pi/agent/extensions"
 mkdir -p "$DEST"
-cp subagent.ts "$DEST/"
-echo "Installed subagent.ts to $DEST"
+cp extensions/*.ts "$DEST/"
+echo "Installed extensions to $DEST"
