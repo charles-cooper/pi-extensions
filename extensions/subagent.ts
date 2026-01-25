@@ -341,7 +341,7 @@ export default function (pi: ExtensionAPI) {
 				// Output
 				container.addChild(new Text("\n" + theme.fg("muted", "─── Output ───"), 0, 0));
 				if (details.output) {
-					container.addChild(new Markdown(details.output, 0, 0, getMarkdownTheme()));
+					container.addChild(new Markdown(details.output.trim(), 0, 0, getMarkdownTheme()));
 				} else {
 					container.addChild(new Text(theme.fg("muted", "(no output)"), 0, 0));
 				}
