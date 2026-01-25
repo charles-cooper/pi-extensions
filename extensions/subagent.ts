@@ -12,7 +12,7 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { type ExtensionAPI, type ExtensionContext, getMarkdownTheme } from "@mariozechner/pi-coding-agent";
 import type { Message } from "@mariozechner/pi-ai";
 import { Container, Markdown, Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
@@ -341,7 +341,7 @@ export default function (pi: ExtensionAPI) {
 				// Output
 				container.addChild(new Text("\n" + theme.fg("muted", "─── Output ───"), 0, 0));
 				if (details.output) {
-					container.addChild(new Markdown(details.output, 0, 0));
+					container.addChild(new Markdown(details.output, 0, 0, getMarkdownTheme()));
 				} else {
 					container.addChild(new Text(theme.fg("muted", "(no output)"), 0, 0));
 				}
