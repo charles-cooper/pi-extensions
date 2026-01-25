@@ -128,7 +128,12 @@ async function runSubagent(
 	let wasAborted = false;
 
 	const exitCode = await new Promise<number>((resolve) => {
-		const proc = spawn("pi", args, { cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
+		const proc = spawn("pi", args, {
+			cwd,
+			shell: false,
+			stdio: ["ignore", "pipe", "pipe"],
+			env: { ...process.env, FORCE_COLOR: "0", NO_COLOR: "1" },
+		});
 		let buffer = "";
 		let stderr = "";
 
