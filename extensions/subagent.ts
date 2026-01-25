@@ -213,13 +213,19 @@ async function runSubagent(
 }
 
 export default function (pi: ExtensionAPI) {
+	// Build description with available models from settings
+	const enabledModels = readEnabledModels();
+	const modelList = enabledModels.length > 0 
+		? enabledModels.join(", ") 
+		: "(all models with API keys)";
+
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
 		description:
-			"Spawn a subagent with isolated context. Params: model (full model ID from available models), task (instruction), context (optional, XML-structured context), tools (optional array).",
+			`Spawn a subagent with isolated context. Params: model (full model ID from available models), task (instruction), context (optional XML), tools (optional array). Available models: ${modelList}`,
 		parameters: Type.Object({
-			model: Type.String({ description: "Full model ID from available models list" }),
+			model: Type.String({ description: `Model ID. Available: ${modelList}` }),
 			task: Type.String({ description: "The task instruction for the subagent" }),
 			context: Type.Optional(Type.String({ description: "Optional XML-structured context to pass" })),
 			tools: Type.Optional(Type.Array(Type.String(), { description: "Tool names to enable (default: all)" })),
