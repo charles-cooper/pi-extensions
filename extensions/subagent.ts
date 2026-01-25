@@ -71,24 +71,21 @@ function readEnabledModels(): string[] {
 
 function getAvailableModels(ctx: ExtensionContext): Map<string, { provider: string; id: string }> {
 	const models = new Map<string, { provider: string; id: string }>();
-	const enabledPatterns = readEnabledModels();
+	const enabledModels = readEnabledModels();
+	// Normalize to lowercase set for exact matching
+	const enabledSet = new Set(enabledModels.map((m) => m.toLowerCase()));
 
-	for (const model of ctx.modelRegistry.getModels()) {
-		if (!ctx.modelRegistry.getApiKey(model.provider)) continue;
+	for (const model of ctx.modelRegistry.getAvailable()) {
 
-		const id = model.id.toLowerCase();
-		const name = model.name.toLowerCase();
+		const fullSpec = `${model.provider}/${model.id}`.toLowerCase();
 
-		// If enabledModels is set, filter to only those patterns
-		if (enabledPatterns.length > 0) {
-			const matches = enabledPatterns.some((p) => {
-				const pattern = p.toLowerCase();
-				return id.includes(pattern) || name.includes(pattern);
-			});
-			if (!matches) continue;
+		// If enabledModels is set, only include exact matches
+		if (enabledSet.size > 0 && !enabledSet.has(fullSpec)) {
+			continue;
 		}
 
-		models.set(model.id, { provider: model.provider, id: model.id });
+		// Key by full spec (provider/id) for unambiguous lookup
+		models.set(fullSpec, { provider: model.provider, id: model.id });
 	}
 
 	return models;
@@ -220,7 +217,7 @@ export default function (pi: ExtensionAPI) {
 		name: "subagent",
 		label: "Subagent",
 		description:
-			"Spawn a subagent with isolated context. Params: model (full model ID from available models), task (instruction), context (optional XML), tools (optional array).",
+			"Spawn a subagent with isolated context. Params: model (full model ID from available models), task (instruction), context (optional, XML-structured context), tools (optional array).",
 		parameters: Type.Object({
 			model: Type.String({ description: "Full model ID from available models list" }),
 			task: Type.String({ description: "The task instruction for the subagent" }),
