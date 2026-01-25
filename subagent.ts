@@ -72,7 +72,6 @@ function getAvailableModels(ctx: ExtensionContext): Map<string, { provider: stri
 	const models = new Map<string, { provider: string; id: string }>();
 	const enabledPatterns = readEnabledModels();
 
-	// Get all models from registry that have API keys
 	for (const model of ctx.modelRegistry.getModels()) {
 		if (!ctx.modelRegistry.getApiKey(model.provider)) continue;
 
@@ -88,20 +87,6 @@ function getAvailableModels(ctx: ExtensionContext): Map<string, { provider: stri
 			if (!matches) continue;
 		}
 
-		// Create short aliases
-		if (id.includes("haiku")) models.set("haiku", { provider: model.provider, id: model.id });
-		if (id.includes("sonnet")) models.set("sonnet", { provider: model.provider, id: model.id });
-		if (id.includes("opus")) models.set("opus", { provider: model.provider, id: model.id });
-		if (id.includes("gpt-4o-mini")) models.set("4o-mini", { provider: model.provider, id: model.id });
-		if (id.includes("gpt-4o") && !id.includes("mini")) models.set("4o", { provider: model.provider, id: model.id });
-		if (id.includes("gpt-4.1")) models.set("4.1", { provider: model.provider, id: model.id });
-		if (id.includes("o3")) models.set("o3", { provider: model.provider, id: model.id });
-		if (id.includes("o1")) models.set("o1", { provider: model.provider, id: model.id });
-		if (id.includes("gemini-2.5-flash")) models.set("flash", { provider: model.provider, id: model.id });
-		if (id.includes("gemini-2.5-pro")) models.set("gemini-pro", { provider: model.provider, id: model.id });
-		if (name.includes("deepseek")) models.set("deepseek", { provider: model.provider, id: model.id });
-
-		// Always add full id as fallback
 		models.set(model.id, { provider: model.provider, id: model.id });
 	}
 
@@ -230,20 +215,18 @@ async function runSubagent(
 }
 
 export default function (pi: ExtensionAPI) {
-	// Build model list for description
 	const getModelList = (ctx: ExtensionContext) => {
 		const models = getAvailableModels(ctx);
-		const aliases = [...models.keys()].filter((k) => !k.includes("/") && k.length < 15);
-		return aliases.slice(0, 10).join(", ");
+		return [...models.keys()].join(", ");
 	};
 
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
 		description:
-			"Spawn a subagent with isolated context. Params: model (e.g. haiku, sonnet, 4o-mini), task (instruction), context (optional XML), tools (optional array).",
+			"Spawn a subagent with isolated context. Params: model (full model ID), task (instruction), context (optional XML), tools (optional array).",
 		parameters: Type.Object({
-			model: Type.String({ description: "Model alias: haiku, sonnet, opus, 4o, 4o-mini, flash, etc." }),
+			model: Type.String({ description: "Full model ID (e.g. claude-sonnet-4-20250514, gpt-4o-mini)" }),
 			task: Type.String({ description: "The task instruction for the subagent" }),
 			context: Type.Optional(Type.String({ description: "Optional XML-structured context to pass" })),
 			tools: Type.Optional(Type.Array(Type.String(), { description: "Tool names to enable (default: all)" })),
@@ -254,7 +237,7 @@ export default function (pi: ExtensionAPI) {
 			const resolved = models.get(params.model.toLowerCase());
 
 			if (!resolved) {
-				const available = [...models.keys()].filter((k) => k.length < 15).join(", ");
+				const available = [...models.keys()].join(", ");
 				return {
 					content: [{ type: "text", text: `Unknown model "${params.model}". Available: ${available}` }],
 					isError: true,
@@ -382,8 +365,7 @@ export default function (pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			if (!args?.trim()) {
 				const models = getAvailableModels(ctx);
-				const aliases = [...models.keys()].filter((k) => k.length < 15).slice(0, 10);
-				ctx.ui.notify(`Usage: /subagent <model> <task>\nModels: ${aliases.join(", ")}`, "info");
+				ctx.ui.notify(`Usage: /subagent <model> <task>\nModels: ${[...models.keys()].join(", ")}`, "info");
 				return;
 			}
 
