@@ -14,7 +14,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type ExtensionAPI, type ExtensionContext, getMarkdownTheme } from "@mariozechner/pi-coding-agent";
 import type { Message } from "@mariozechner/pi-ai";
-import { Container, Markdown, Text } from "@mariozechner/pi-tui";
+import { Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 
 interface UsageStats {
@@ -32,10 +32,72 @@ interface SubagentResult {
 	context?: string;
 	exitCode: number;
 	output: string;
+	messages: Message[];
 	usage: UsageStats;
 	stopReason?: string;
 	errorMessage?: string;
 	availableModels?: string[];
+}
+
+type DisplayItem = 
+	| { type: "text"; text: string }
+	| { type: "toolCall"; name: string; args: Record<string, unknown> };
+
+function getDisplayItems(messages: Message[]): DisplayItem[] {
+	const items: DisplayItem[] = [];
+	for (const msg of messages) {
+		if (msg.role === "assistant") {
+			for (const part of msg.content) {
+				if (part.type === "text") items.push({ type: "text", text: part.text });
+				else if (part.type === "toolCall") items.push({ type: "toolCall", name: part.name, args: part.arguments });
+			}
+		}
+	}
+	return items;
+}
+
+function getFinalOutput(messages: Message[]): string {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const msg = messages[i];
+		if (msg.role === "assistant") {
+			for (const part of msg.content) {
+				if (part.type === "text") return part.text;
+			}
+		}
+	}
+	return "";
+}
+
+function formatToolCall(name: string, args: Record<string, unknown>, themeFg: (color: string, text: string) => string): string {
+	const shortenPath = (p: string) => {
+		const home = os.homedir();
+		return p.startsWith(home) ? `~${p.slice(home.length)}` : p;
+	};
+
+	switch (name) {
+		case "Bash": {
+			const cmd = (args.command as string) || "...";
+			const preview = cmd.length > 60 ? `${cmd.slice(0, 60)}...` : cmd;
+			return themeFg("muted", "$ ") + themeFg("toolOutput", preview);
+		}
+		case "Read": {
+			const filePath = shortenPath((args.path || "...") as string);
+			return themeFg("muted", "read ") + themeFg("accent", filePath);
+		}
+		case "Write": {
+			const filePath = shortenPath((args.path || "...") as string);
+			return themeFg("muted", "write ") + themeFg("accent", filePath);
+		}
+		case "Edit": {
+			const filePath = shortenPath((args.path || "...") as string);
+			return themeFg("muted", "edit ") + themeFg("accent", filePath);
+		}
+		default: {
+			const argsStr = JSON.stringify(args);
+			const preview = argsStr.length > 50 ? `${argsStr.slice(0, 50)}...` : argsStr;
+			return themeFg("accent", name) + themeFg("dim", ` ${preview}`);
+		}
+	}
 }
 
 function formatTokens(n: number): string {
@@ -120,6 +182,7 @@ async function runSubagent(
 		context,
 		exitCode: 0,
 		output: "",
+		messages: [],
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 },
 	};
 
@@ -148,16 +211,11 @@ async function runSubagent(
 
 			if (event.type === "message_end" && event.message) {
 				const msg = event.message as Message;
+				result.messages.push(msg);
 				if (msg.role === "assistant") {
 					result.usage.turns++;
-					// Extract final text (safely handle missing content)
-					if (Array.isArray(msg.content)) {
-						for (const part of msg.content) {
-							if (part.type === "text") {
-								result.output = part.text;
-							}
-						}
-					}
+					// Update output to latest text
+					result.output = getFinalOutput(result.messages);
 					const usage = msg.usage;
 					if (usage) {
 						result.usage.input += usage.input || 0;
@@ -168,12 +226,13 @@ async function runSubagent(
 					}
 					if (msg.stopReason) result.stopReason = msg.stopReason;
 					if (msg.errorMessage) result.errorMessage = msg.errorMessage;
-					emitUpdate();
 				}
+				emitUpdate();
 			}
 
-			// Also capture tool results for streaming updates
+			// Also capture tool results
 			if (event.type === "tool_result_end" && event.message) {
+				result.messages.push(event.message as Message);
 				emitUpdate();
 			}
 		};
@@ -314,6 +373,9 @@ export default function (pi: ExtensionAPI) {
 
 			if (expanded) {
 				const container = new Container();
+				const mdTheme = getMarkdownTheme();
+				const displayItems = getDisplayItems(details.messages);
+				const finalOutput = getFinalOutput(details.messages);
 
 				// Header
 				let header = `${icon} ${theme.fg("toolTitle", theme.bold("subagent "))}`;
@@ -329,26 +391,44 @@ export default function (pi: ExtensionAPI) {
 				}
 
 				// Task
-				container.addChild(new Text("\n" + theme.fg("muted", "─── Task ───"), 0, 0));
+				container.addChild(new Spacer(1));
+				container.addChild(new Text(theme.fg("muted", "─── Task ───"), 0, 0));
 				container.addChild(new Text(theme.fg("dim", details.task), 0, 0));
 
 				// Context
 				if (details.context) {
-					container.addChild(new Text("\n" + theme.fg("muted", "─── Context ───"), 0, 0));
+					container.addChild(new Spacer(1));
+					container.addChild(new Text(theme.fg("muted", "─── Context ───"), 0, 0));
 					container.addChild(new Text(theme.fg("dim", details.context), 0, 0));
 				}
 
+				// Tool calls
+				const toolCalls = displayItems.filter((i) => i.type === "toolCall");
+				if (toolCalls.length > 0) {
+					container.addChild(new Spacer(1));
+					container.addChild(new Text(theme.fg("muted", "─── Tool Calls ───"), 0, 0));
+					for (const item of toolCalls) {
+						if (item.type === "toolCall") {
+							container.addChild(new Text(
+								theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, theme.fg.bind(theme)),
+								0, 0
+							));
+						}
+					}
+				}
+
 				// Output
-				container.addChild(new Text("\n" + theme.fg("muted", "─── Output ───"), 0, 0));
-				if (details.output) {
-					container.addChild(new Markdown(details.output.trim(), 0, 0, getMarkdownTheme()));
+				container.addChild(new Spacer(1));
+				container.addChild(new Text(theme.fg("muted", "─── Output ───"), 0, 0));
+				if (finalOutput) {
+					container.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
 				} else {
 					container.addChild(new Text(theme.fg("muted", "(no output)"), 0, 0));
 				}
 
 				// Usage
-				const usage = formatUsage(details.usage, details.model);
-				container.addChild(new Text("\n" + theme.fg("dim", usage), 0, 0));
+				container.addChild(new Spacer(1));
+				container.addChild(new Text(theme.fg("dim", formatUsage(details.usage, details.model)), 0, 0));
 
 				return container;
 			}
