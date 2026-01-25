@@ -1,11 +1,9 @@
 /**
- * Simple Subagent Tool
+ * Subagent Tool
  *
- * Spawn a subagent with isolated context. The parent LLM provides:
- * - model: which model to use (from scoped models)
- * - task: the instruction
- * - context: optional XML-structured context
- * - tools: optional tool restriction
+ * Spawn subagents with isolated context. Supports:
+ * - Single mode: model + task
+ * - Parallel mode: tasks array for concurrent execution
  */
 
 import { spawn } from "node:child_process";
@@ -16,6 +14,9 @@ import { type ExtensionAPI, type ExtensionContext, getMarkdownTheme } from "@mar
 import type { Message } from "@mariozechner/pi-ai";
 import { Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
+
+const MAX_PARALLEL = 8;
+const MAX_CONCURRENCY = 4;
 
 interface UsageStats {
 	input: number;
@@ -36,7 +37,29 @@ interface SubagentResult {
 	usage: UsageStats;
 	stopReason?: string;
 	errorMessage?: string;
+}
+
+interface SubagentDetails {
+	mode: "single" | "parallel";
+	results: SubagentResult[];
 	availableModels?: string[];
+}
+
+async function mapWithConcurrency<T, R>(
+	items: T[],
+	concurrency: number,
+	fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+	const results: R[] = new Array(items.length);
+	let nextIndex = 0;
+	const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+		while (nextIndex < items.length) {
+			const index = nextIndex++;
+			results[index] = await fn(items[index], index);
+		}
+	});
+	await Promise.all(workers);
+	return results;
 }
 
 type DisplayItem = 
@@ -290,36 +313,135 @@ export default function (pi: ExtensionAPI) {
 		? enabledModels.join(", ") 
 		: "(all models with API keys)";
 
+	const TaskItem = Type.Object({
+		model: Type.String({ description: "Model ID" }),
+		task: Type.String({ description: "Task instruction" }),
+		context: Type.Optional(Type.String({ description: "Optional XML context" })),
+		tools: Type.Optional(Type.Array(Type.String(), { description: "Tool names to enable" })),
+	});
+
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
 		description:
 			`Spawn a subagent with isolated context. Params: model (full model ID from available models), task (instruction), context (optional XML), tools (optional array). Available models: ${modelList}`,
 		parameters: Type.Object({
-			model: Type.String({ description: `Model ID. Available: ${modelList}` }),
-			task: Type.String({ description: "The task instruction for the subagent" }),
+			// Single mode
+			model: Type.Optional(Type.String({ description: `Model ID. Available: ${modelList}` })),
+			task: Type.Optional(Type.String({ description: "The task instruction for the subagent" })),
 			context: Type.Optional(Type.String({ description: "Optional XML-structured context to pass" })),
 			tools: Type.Optional(Type.Array(Type.String(), { description: "Tool names to enable (default: all)" })),
+			// Parallel mode
+			tasks: Type.Optional(Type.Array(TaskItem, { description: "Array of tasks for parallel execution (max 8)" })),
 		}),
 
 		async execute(_id, params, onUpdate, ctx, signal) {
 			const models = getAvailableModels(ctx);
-			const resolved = models.get(params.model.toLowerCase());
+			const availableModels = [...models.keys()];
 
-			if (!resolved) {
-				const available = [...models.keys()].join(", ");
+			const resolveModel = (model: string) => {
+				const resolved = models.get(model.toLowerCase());
+				if (!resolved) return null;
+				return `${resolved.provider}/${resolved.id}`;
+			};
+
+			const hasSingle = params.model && params.task;
+			const hasParallel = params.tasks && params.tasks.length > 0;
+
+			if (hasSingle === hasParallel) {
 				return {
-					content: [{ type: "text", text: `Unknown model "${params.model}". Available: ${available}` }],
+					content: [{ type: "text", text: `Provide either (model + task) or tasks array, not both/neither.\nAvailable models: ${availableModels.join(", ")}` }],
 					isError: true,
 				};
 			}
 
-			const modelSpec = `${resolved.provider}/${resolved.id}`;
+			// Parallel mode
+			if (hasParallel) {
+				if (params.tasks!.length > MAX_PARALLEL) {
+					return {
+						content: [{ type: "text", text: `Too many tasks (${params.tasks!.length}). Max is ${MAX_PARALLEL}.` }],
+						isError: true,
+					};
+				}
+
+				// Validate all models upfront
+				for (const t of params.tasks!) {
+					if (!resolveModel(t.model)) {
+						return {
+							content: [{ type: "text", text: `Unknown model "${t.model}". Available: ${availableModels.join(", ")}` }],
+							isError: true,
+						};
+					}
+				}
+
+				// Track results for streaming
+				const allResults: SubagentResult[] = params.tasks!.map((t) => ({
+					model: resolveModel(t.model)!,
+					task: t.task,
+					context: t.context,
+					exitCode: -1, // -1 = running
+					output: "",
+					messages: [],
+					usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 },
+				}));
+
+				const emitUpdate = () => {
+					if (onUpdate) {
+						const done = allResults.filter((r) => r.exitCode !== -1).length;
+						const running = allResults.length - done;
+						onUpdate({
+							content: [{ type: "text", text: `${done}/${allResults.length} done, ${running} running...` }],
+							details: { mode: "parallel", results: [...allResults], availableModels } as SubagentDetails,
+						});
+					}
+				};
+
+				emitUpdate();
+
+				await mapWithConcurrency(params.tasks!, MAX_CONCURRENCY, async (t, index) => {
+					const result = await runSubagent(
+						ctx.cwd,
+						resolveModel(t.model)!,
+						t.task,
+						t.context,
+						t.tools,
+						signal,
+						(r) => {
+							allResults[index] = r;
+							emitUpdate();
+						},
+					);
+					allResults[index] = result;
+					emitUpdate();
+					return result;
+				});
+
+				const successCount = allResults.filter((r) => r.exitCode === 0).length;
+				const summaries = allResults.map((r) => {
+					const preview = r.output.slice(0, 100) + (r.output.length > 100 ? "..." : "");
+					return `[${r.model}] ${r.exitCode === 0 ? "✓" : "✗"}: ${preview || r.errorMessage || "(no output)"}`;
+				});
+
+				return {
+					content: [{ type: "text", text: `${successCount}/${allResults.length} succeeded\n\n${summaries.join("\n\n")}` }],
+					details: { mode: "parallel", results: allResults, availableModels } as SubagentDetails,
+					isError: successCount < allResults.length,
+				};
+			}
+
+			// Single mode
+			const modelSpec = resolveModel(params.model!);
+			if (!modelSpec) {
+				return {
+					content: [{ type: "text", text: `Unknown model "${params.model}". Available: ${availableModels.join(", ")}` }],
+					isError: true,
+				};
+			}
 
 			const result = await runSubagent(
 				ctx.cwd,
 				modelSpec,
-				params.task,
+				params.task!,
 				params.context,
 				params.tools,
 				signal,
@@ -327,22 +449,36 @@ export default function (pi: ExtensionAPI) {
 					? (r) =>
 							onUpdate({
 								content: [{ type: "text", text: r.output || "(running...)" }],
-								details: r,
+								details: { mode: "single", results: [r], availableModels } as SubagentDetails,
 							})
 					: undefined,
 			);
 
 			const isError = result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
-			result.availableModels = [...models.keys()];
 
 			return {
 				content: [{ type: "text", text: result.output || result.errorMessage || "(no output)" }],
-				details: result,
+				details: { mode: "single", results: [result], availableModels } as SubagentDetails,
 				isError,
 			};
 		},
 
 		renderCall(args, theme) {
+			// Parallel mode
+			if (args.tasks && args.tasks.length > 0) {
+				let text = theme.fg("toolTitle", theme.bold("subagent "));
+				text += theme.fg("accent", `parallel (${args.tasks.length} tasks)`);
+				for (const t of args.tasks.slice(0, 3)) {
+					const preview = t.task.length > 40 ? t.task.slice(0, 40) + "..." : t.task;
+					text += `\n  ${theme.fg("accent", t.model)} ${theme.fg("dim", preview)}`;
+				}
+				if (args.tasks.length > 3) {
+					text += `\n  ${theme.fg("muted", `... +${args.tasks.length - 3} more`)}`;
+				}
+				return new Text(text, 0, 0);
+			}
+
+			// Single mode
 			const model = args.model || "?";
 			const task = args.task || "...";
 			const preview = task.length > 60 ? task.slice(0, 60) + "..." : task;
@@ -362,91 +498,209 @@ export default function (pi: ExtensionAPI) {
 		},
 
 		renderResult(result, { expanded }, theme) {
-			const details = result.details as SubagentResult | undefined;
-			if (!details) {
+			const details = result.details as SubagentDetails | undefined;
+			if (!details || details.results.length === 0) {
 				const text = result.content[0];
 				return new Text(text?.type === "text" ? text.text : "(no output)", 0, 0);
 			}
 
-			const isError = details.exitCode !== 0 || details.stopReason === "error" || details.stopReason === "aborted";
-			const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
+			const mdTheme = getMarkdownTheme();
 
-			if (expanded) {
-				const container = new Container();
-				const mdTheme = getMarkdownTheme();
-				const displayItems = getDisplayItems(details.messages);
-				const finalOutput = getFinalOutput(details.messages);
-
-				// Header
-				let header = `${icon} ${theme.fg("toolTitle", theme.bold("subagent "))}`;
-				header += theme.fg("accent", details.model);
-				if (isError && details.stopReason) {
-					header += ` ${theme.fg("error", `[${details.stopReason}]`)}`;
+			const aggregateUsage = (results: SubagentResult[]): UsageStats => {
+				const total = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
+				for (const r of results) {
+					total.input += r.usage.input;
+					total.output += r.usage.output;
+					total.cacheRead += r.usage.cacheRead;
+					total.cacheWrite += r.usage.cacheWrite;
+					total.cost += r.usage.cost;
+					total.turns += r.usage.turns;
 				}
-				container.addChild(new Text(header, 0, 0));
+				return total;
+			};
 
-				// Error
-				if (details.errorMessage) {
-					container.addChild(new Text(theme.fg("error", details.errorMessage), 0, 0));
+			const renderSingleResult = (r: SubagentResult, showHeader: boolean) => {
+				const isError = r.exitCode !== 0 || r.stopReason === "error" || r.stopReason === "aborted";
+				const icon = r.exitCode === -1
+					? theme.fg("warning", "⏳")
+					: isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
+				const displayItems = getDisplayItems(r.messages);
+				const finalOutput = getFinalOutput(r.messages);
+				const toolCalls = displayItems.filter((i) => i.type === "toolCall");
+
+				const container = new Container();
+
+				if (showHeader) {
+					let header = `${icon} ${theme.fg("accent", r.model)}`;
+					if (isError && r.stopReason) header += ` ${theme.fg("error", `[${r.stopReason}]`)}`;
+					container.addChild(new Text(header, 0, 0));
+				}
+
+				if (r.errorMessage) {
+					container.addChild(new Text(theme.fg("error", r.errorMessage), 0, 0));
 				}
 
 				// Task
-				container.addChild(new Spacer(1));
-				container.addChild(new Text(theme.fg("muted", "─── Task ───"), 0, 0));
-				container.addChild(new Text(theme.fg("dim", details.task), 0, 0));
-
-				// Context
-				if (details.context) {
-					container.addChild(new Spacer(1));
-					container.addChild(new Text(theme.fg("muted", "─── Context ───"), 0, 0));
-					container.addChild(new Text(theme.fg("dim", details.context), 0, 0));
-				}
+				container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
 
 				// Tool calls
-				const toolCalls = displayItems.filter((i) => i.type === "toolCall");
-				if (toolCalls.length > 0) {
-					container.addChild(new Spacer(1));
-					container.addChild(new Text(theme.fg("muted", "─── Tool Calls ───"), 0, 0));
-					for (const item of toolCalls) {
-						if (item.type === "toolCall") {
-							container.addChild(new Text(
-								theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, theme.fg.bind(theme)),
-								0, 0
-							));
-						}
+				for (const item of toolCalls) {
+					if (item.type === "toolCall") {
+						container.addChild(new Text(
+							theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, theme.fg.bind(theme)),
+							0, 0
+						));
 					}
 				}
 
 				// Output
-				container.addChild(new Spacer(1));
-				container.addChild(new Text(theme.fg("muted", "─── Output ───"), 0, 0));
 				if (finalOutput) {
+					container.addChild(new Spacer(1));
 					container.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
-				} else {
-					container.addChild(new Text(theme.fg("muted", "(no output)"), 0, 0));
+				} else if (r.exitCode === -1) {
+					container.addChild(new Text(theme.fg("muted", "(running...)"), 0, 0));
 				}
 
 				// Usage
+				if (r.exitCode !== -1) {
+					container.addChild(new Text(theme.fg("dim", formatUsage(r.usage, r.model)), 0, 0));
+				}
+
+				return container;
+			};
+
+			// Single mode
+			if (details.mode === "single") {
+				const r = details.results[0];
+				const isError = r.exitCode !== 0 || r.stopReason === "error" || r.stopReason === "aborted";
+				const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
+
+				if (expanded) {
+					const container = new Container();
+					const displayItems = getDisplayItems(r.messages);
+					const finalOutput = getFinalOutput(r.messages);
+					const toolCalls = displayItems.filter((i) => i.type === "toolCall");
+
+					// Header
+					let header = `${icon} ${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("accent", r.model)}`;
+					if (isError && r.stopReason) header += ` ${theme.fg("error", `[${r.stopReason}]`)}`;
+					container.addChild(new Text(header, 0, 0));
+
+					if (r.errorMessage) {
+						container.addChild(new Text(theme.fg("error", r.errorMessage), 0, 0));
+					}
+
+					// Task
+					container.addChild(new Spacer(1));
+					container.addChild(new Text(theme.fg("muted", "─── Task ───"), 0, 0));
+					container.addChild(new Text(theme.fg("dim", r.task), 0, 0));
+
+					// Context
+					if (r.context) {
+						container.addChild(new Spacer(1));
+						container.addChild(new Text(theme.fg("muted", "─── Context ───"), 0, 0));
+						container.addChild(new Text(theme.fg("dim", r.context), 0, 0));
+					}
+
+					// Tool calls
+					if (toolCalls.length > 0) {
+						container.addChild(new Spacer(1));
+						container.addChild(new Text(theme.fg("muted", "─── Tool Calls ───"), 0, 0));
+						for (const item of toolCalls) {
+							if (item.type === "toolCall") {
+								container.addChild(new Text(
+									theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, theme.fg.bind(theme)),
+									0, 0
+								));
+							}
+						}
+					}
+
+					// Output
+					container.addChild(new Spacer(1));
+					container.addChild(new Text(theme.fg("muted", "─── Output ───"), 0, 0));
+					const finalOut = getFinalOutput(r.messages);
+					if (finalOut) {
+						container.addChild(new Markdown(finalOut.trim(), 0, 0, mdTheme));
+					} else {
+						container.addChild(new Text(theme.fg("muted", "(no output)"), 0, 0));
+					}
+
+					// Usage
+					container.addChild(new Spacer(1));
+					container.addChild(new Text(theme.fg("dim", formatUsage(r.usage, r.model)), 0, 0));
+
+					return container;
+				}
+
+				// Collapsed single
+				let text = `${icon} ${theme.fg("accent", r.model)}`;
+				if (isError && r.errorMessage) {
+					text += ` ${theme.fg("error", r.errorMessage)}`;
+				} else if (r.output) {
+					const preview = r.output.split("\n").slice(0, 5).join("\n");
+					const truncated = r.output.split("\n").length > 5;
+					text += "\n" + theme.fg("toolOutput", preview);
+					if (truncated) text += "\n" + theme.fg("muted", "... (Ctrl+O to expand)");
+				} else {
+					text += " " + theme.fg("muted", "(no output)");
+				}
+				text += "\n" + theme.fg("dim", formatUsage(r.usage, r.model));
+				return new Text(text, 0, 0);
+			}
+
+			// Parallel mode
+			const running = details.results.filter((r) => r.exitCode === -1).length;
+			const successCount = details.results.filter((r) => r.exitCode === 0).length;
+			const failCount = details.results.filter((r) => r.exitCode > 0).length;
+			const isRunning = running > 0;
+			const icon = isRunning
+				? theme.fg("warning", "⏳")
+				: failCount > 0
+					? theme.fg("warning", "◐")
+					: theme.fg("success", "✓");
+			const status = isRunning
+				? `${successCount + failCount}/${details.results.length} done, ${running} running`
+				: `${successCount}/${details.results.length} succeeded`;
+
+			if (expanded && !isRunning) {
+				const container = new Container();
+				container.addChild(new Text(
+					`${icon} ${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("accent", `parallel ${status}`)}`,
+					0, 0
+				));
+
+				for (const r of details.results) {
+					container.addChild(new Spacer(1));
+					container.addChild(new Text(theme.fg("muted", "────────────────────"), 0, 0));
+					container.addChild(renderSingleResult(r, true));
+				}
+
+				const totalUsage = aggregateUsage(details.results);
 				container.addChild(new Spacer(1));
-				container.addChild(new Text(theme.fg("dim", formatUsage(details.usage, details.model)), 0, 0));
+				container.addChild(new Text(theme.fg("dim", `Total: ${formatUsage(totalUsage, "")}`), 0, 0));
 
 				return container;
 			}
 
-			// Collapsed
-			let text = `${icon} ${theme.fg("accent", details.model)}`;
-			if (isError && details.errorMessage) {
-				text += ` ${theme.fg("error", details.errorMessage)}`;
-			} else if (details.output) {
-				const preview = details.output.split("\n").slice(0, 5).join("\n");
-				const truncated = details.output.split("\n").length > 5;
-				text += "\n" + theme.fg("toolOutput", preview);
-				if (truncated) text += "\n" + theme.fg("muted", "... (Ctrl+O to expand)");
-			} else {
-				text += " " + theme.fg("muted", "(no output)");
+			// Collapsed parallel
+			let text = `${icon} ${theme.fg("toolTitle", theme.bold("parallel "))}${theme.fg("accent", status)}`;
+			for (const r of details.results) {
+				const rIcon = r.exitCode === -1
+					? theme.fg("warning", "⏳")
+					: r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
+				const preview = r.output
+					? (r.output.length > 60 ? r.output.slice(0, 60) + "..." : r.output).split("\n")[0]
+					: r.exitCode === -1 ? "(running...)" : "(no output)";
+				text += `\n${rIcon} ${theme.fg("accent", r.model)} ${theme.fg("dim", preview)}`;
 			}
-			text += "\n" + theme.fg("dim", formatUsage(details.usage, details.model));
-
+			if (!isRunning) {
+				const totalUsage = aggregateUsage(details.results);
+				text += `\n${theme.fg("dim", `Total: ${formatUsage(totalUsage, "")}`)}`;
+			}
+			if (!expanded && !isRunning) {
+				text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
+			}
 			return new Text(text, 0, 0);
 		},
 	});
