@@ -145,10 +145,12 @@ async function runSubagent(
 				const msg = event.message as Message;
 				if (msg.role === "assistant") {
 					result.usage.turns++;
-					// Extract final text
-					for (const part of msg.content) {
-						if (part.type === "text") {
-							result.output = part.text;
+					// Extract final text (safely handle missing content)
+					if (Array.isArray(msg.content)) {
+						for (const part of msg.content) {
+							if (part.type === "text") {
+								result.output = part.text;
+							}
 						}
 					}
 					const usage = msg.usage;
@@ -163,6 +165,11 @@ async function runSubagent(
 					if (msg.errorMessage) result.errorMessage = msg.errorMessage;
 					emitUpdate();
 				}
+			}
+
+			// Also capture tool results for streaming updates
+			if (event.type === "tool_result_end" && event.message) {
+				emitUpdate();
 			}
 		};
 
