@@ -1,1 +1,7 @@
 .sandbox
+node_modules/
+.agent-files/
+.agent-files.git/
+package.json
+package-lock.json
+*.mjs
