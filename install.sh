@@ -3,5 +3,5 @@
 
 DEST="$HOME/.pi/agent/extensions"
 mkdir -p "$DEST"
-cp extensions/*.ts "$DEST/"
+cp --remove-destination extensions/*.ts "$DEST/"
 echo "Installed extensions to $DEST"
