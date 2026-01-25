@@ -369,17 +369,8 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			const parts = args.trim().split(/\s+/);
-			const model = parts[0];
-			const task = parts.slice(1).join(" ");
-
-			if (!task) {
-				ctx.ui.notify("Usage: /subagent <model> <task>", "error");
-				return;
-			}
-
-			// Send as user message to trigger the LLM to use the tool
-			pi.sendUserMessage(`Use a ${model} subagent to: ${task}`);
+			// Let the LLM figure out model vs task
+			pi.sendUserMessage(`Use a subagent: ${args.trim()}`);
 		},
 	});
 }
