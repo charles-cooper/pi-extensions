@@ -45,6 +45,11 @@ interface SubagentDetails {
 	availableModels?: string[];
 }
 
+/** Check if a subagent result is an error (used consistently throughout) */
+function isResultError(r: SubagentResult): boolean {
+	return r.exitCode !== 0 || r.stopReason === "error" || r.stopReason === "aborted";
+}
+
 async function mapWithConcurrency<T, R>(
 	items: T[],
 	concurrency: number,
@@ -727,14 +732,16 @@ export default function (pi: ExtensionAPI) {
 					return result;
 				});
 
-				const successCount = allResults.filter((r) => r.exitCode === 0).length;
-				const summaries = allResults.map((r) => {
-					const preview = r.output.slice(0, 100) + (r.output.length > 100 ? "..." : "");
-					return `[${r.model}] ${r.exitCode === 0 ? "✓" : "✗"}: ${preview || r.errorMessage || "(no output)"}`;
+				const successCount = allResults.filter((r) => !isResultError(r)).length;
+				const fullOutputs = allResults.map((r, i) => {
+					const status = isResultError(r) ? "✗" : "✓";
+					const header = `[${i + 1}/${allResults.length}] ${status} ${r.model}`;
+					const body = r.output || r.errorMessage || "(no output)";
+					return `${header}\n${body}`;
 				});
 
 				return {
-					content: [{ type: "text", text: `${successCount}/${allResults.length} succeeded\n\n${summaries.join("\n\n")}` }],
+					content: [{ type: "text", text: `${successCount}/${allResults.length} succeeded\n\n${fullOutputs.join("\n\n---\n\n")}` }],
 					details: { mode: "parallel", results: allResults, availableModels } as SubagentDetails,
 					isError: successCount < allResults.length,
 				};
@@ -958,8 +965,9 @@ export default function (pi: ExtensionAPI) {
 
 			// Parallel mode
 			const running = details.results.filter((r) => r.exitCode === -1).length;
-			const successCount = details.results.filter((r) => r.exitCode === 0).length;
-			const failCount = details.results.filter((r) => r.exitCode > 0).length;
+			const done = details.results.filter((r) => r.exitCode !== -1);
+			const successCount = done.filter((r) => !isResultError(r)).length;
+			const failCount = done.filter((r) => isResultError(r)).length;
 			const isRunning = running > 0;
 			const icon = isRunning
 				? theme.fg("warning", "⏳")
@@ -995,7 +1003,7 @@ export default function (pi: ExtensionAPI) {
 			for (const r of details.results) {
 				const rIcon = r.exitCode === -1
 					? theme.fg("warning", "⏳")
-					: r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
+					: isResultError(r) ? theme.fg("error", "✗") : theme.fg("success", "✓");
 				const preview = r.output
 					? (r.output.length > 60 ? r.output.slice(0, 60) + "..." : r.output).split("\n")[0]
 					: r.exitCode === -1 ? "(running...)" : "(no output)";
