@@ -551,6 +551,11 @@ async function runSubagent(
 				result.partialMessage = event.message as Message;
 				emitUpdate();
 			}
+
+			// Capture tool execution events for live updates during tool runs
+			if (event.type === "tool_execution_start" || event.type === "tool_execution_update" || event.type === "tool_execution_end") {
+				emitUpdate();
+			}
 		};
 
 		proc.stdout.on("data", (data) => {
