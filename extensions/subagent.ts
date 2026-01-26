@@ -62,17 +62,50 @@ async function mapWithConcurrency<T, R>(
 	return results;
 }
 
+interface ToolCallWithResult {
+	type: "toolCall";
+	id: string;
+	name: string;
+	args: Record<string, unknown>;
+	result?: {
+		content: Array<{ type: string; text?: string }>;
+		isError: boolean;
+	};
+}
+
 type DisplayItem = 
 	| { type: "text"; text: string }
-	| { type: "toolCall"; name: string; args: Record<string, unknown> };
+	| ToolCallWithResult;
 
 function getDisplayItems(messages: Message[]): DisplayItem[] {
 	const items: DisplayItem[] = [];
+	// First pass: collect tool calls
+	const toolCalls = new Map<string, ToolCallWithResult>();
+	
 	for (const msg of messages) {
 		if (msg.role === "assistant") {
 			for (const part of msg.content) {
-				if (part.type === "text") items.push({ type: "text", text: part.text });
-				else if (part.type === "toolCall") items.push({ type: "toolCall", name: part.name, args: part.arguments });
+				if (part.type === "text") {
+					items.push({ type: "text", text: part.text });
+				} else if (part.type === "toolCall") {
+					const tc: ToolCallWithResult = {
+						type: "toolCall",
+						id: part.id,
+						name: part.name,
+						args: part.arguments
+					};
+					toolCalls.set(part.id, tc);
+					items.push(tc);
+				}
+			}
+		} else if (msg.role === "toolResult") {
+			// Match result to its call
+			const tc = toolCalls.get(msg.toolCallId);
+			if (tc) {
+				tc.result = {
+					content: msg.content as Array<{ type: string; text?: string }>,
+					isError: msg.isError
+				};
 			}
 		}
 	}
@@ -127,10 +160,20 @@ function formatToolCall(name: string, args: Record<string, unknown>, themeFg: (c
 function renderToolCallExpanded(
 	name: string,
 	args: Record<string, unknown>,
+	result: { content: Array<{ type: string; text?: string }>; isError: boolean } | undefined,
 	theme: { fg: (color: string, text: string) => string; bold: (text: string) => string }
 ): Container {
 	const container = new Container();
 	const lowerName = name.toLowerCase();
+
+	// Helper to get text from result
+	const getResultText = (): string => {
+		if (!result) return "";
+		return result.content
+			.filter(c => c.type === "text" && c.text)
+			.map(c => c.text!)
+			.join("\n");
+	};
 
 	switch (lowerName) {
 		case "bash": {
@@ -139,6 +182,18 @@ function renderToolCallExpanded(
 			let header = theme.fg("muted", "$ ") + theme.fg("toolOutput", cmd);
 			if (timeout) header += theme.fg("dim", ` (timeout ${timeout}s)`);
 			container.addChild(new Text(header, 0, 0));
+			// Show bash output
+			const output = getResultText();
+			if (output) {
+				const lines = output.split("\n");
+				const maxLines = 10;
+				const displayLines = lines.slice(0, maxLines);
+				const remaining = lines.length - maxLines;
+				container.addChild(new Text(theme.fg("dim", displayLines.join("\n")), 0, 0));
+				if (remaining > 0) {
+					container.addChild(new Text(theme.fg("muted", `... (${remaining} more lines)`), 0, 0));
+				}
+			}
 			break;
 		}
 		case "read": {
@@ -153,6 +208,28 @@ function renderToolCallExpanded(
 				pathDisplay += theme.fg("warning", `:${startLine}${endLine ? `-${endLine}` : ""}`);
 			}
 			container.addChild(new Text(theme.fg("muted", "read ") + pathDisplay, 0, 0));
+			// Show file content from result
+			const content = getResultText();
+			if (content) {
+				const lang = getLanguageFromPath(rawPath);
+				const lines = content.split("\n");
+				const maxLines = 15;
+				const displayLines = lines.slice(0, maxLines);
+				const remaining = lines.length - maxLines;
+				try {
+					if (lang) {
+						const highlighted = highlightCode(displayLines.join("\n"), lang);
+						container.addChild(new Text(highlighted.join("\n"), 0, 0));
+					} else {
+						container.addChild(new Text(theme.fg("toolOutput", displayLines.join("\n")), 0, 0));
+					}
+				} catch {
+					container.addChild(new Text(theme.fg("toolOutput", displayLines.join("\n")), 0, 0));
+				}
+				if (remaining > 0) {
+					container.addChild(new Text(theme.fg("muted", `... (${remaining} more lines)`), 0, 0));
+				}
+			}
 			break;
 		}
 		case "write": {
@@ -715,14 +792,13 @@ export default function (pi: ExtensionAPI) {
 			// Single mode
 			const model = args.model || "?";
 			const task = args.task || "...";
-			const preview = task.length > 60 ? task.slice(0, 60) + "..." : task;
 
 			let text = theme.fg("toolTitle", theme.bold("subagent "));
 			text += theme.fg("accent", model);
 			if (args.tools?.length) {
 				text += theme.fg("muted", ` [${args.tools.join(", ")}]`);
 			}
-			text += "\n" + theme.fg("dim", preview);
+			text += "\n" + theme.fg("dim", task);
 			if (args.context) {
 				const lines = args.context.split("\n").length;
 				text += "\n" + theme.fg("muted", `(+${lines} lines context)`);
@@ -782,7 +858,7 @@ export default function (pi: ExtensionAPI) {
 					if (item.type === "toolCall") {
 						if (showExpanded) {
 							container.addChild(new Spacer(1));
-							container.addChild(renderToolCallExpanded(item.name, item.args, theme));
+							container.addChild(renderToolCallExpanded(item.name, item.args, item.result, theme));
 						} else {
 							container.addChild(new Text(
 								theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, theme.fg.bind(theme)),
@@ -820,19 +896,13 @@ export default function (pi: ExtensionAPI) {
 					const finalOutput = getFinalOutput(r.messages);
 					const toolCalls = displayItems.filter((i) => i.type === "toolCall");
 
-					// Header
-					let header = `${icon} ${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("accent", r.model)}`;
-					if (isError && r.stopReason) header += ` ${theme.fg("error", `[${r.stopReason}]`)}`;
-					container.addChild(new Text(header, 0, 0));
-
-					if (r.errorMessage) {
-						container.addChild(new Text(theme.fg("error", r.errorMessage), 0, 0));
+					// Just show status icon + error if any (model/task already in renderCall)
+					if (isError) {
+						let statusLine = icon;
+						if (r.stopReason) statusLine += ` ${theme.fg("error", `[${r.stopReason}]`)}`;
+						if (r.errorMessage) statusLine += ` ${theme.fg("error", r.errorMessage)}`;
+						container.addChild(new Text(statusLine, 0, 0));
 					}
-
-					// Task
-					container.addChild(new Spacer(1));
-					container.addChild(new Text(theme.fg("muted", "─── Task ───"), 0, 0));
-					container.addChild(new Text(theme.fg("dim", r.task), 0, 0));
 
 					// Context
 					if (r.context) {
@@ -848,7 +918,7 @@ export default function (pi: ExtensionAPI) {
 						for (const item of toolCalls) {
 							if (item.type === "toolCall") {
 								container.addChild(new Spacer(1));
-								container.addChild(renderToolCallExpanded(item.name, item.args, theme));
+								container.addChild(renderToolCallExpanded(item.name, item.args, item.result, theme));
 							}
 						}
 					}
