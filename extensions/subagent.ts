@@ -154,11 +154,20 @@ function readEnabledModels(): string[] {
 	}
 }
 
-// Model skills: prefix -> description
+// Model skills: prefix -> description + ratings (1-10 scale)
 interface ModelSkill {
 	prefix: string;      // e.g. "openrouter/openai" or "anthropic/claude-sonnet-4-5"
 	for: string;         // short description of strengths
 	weaknesses?: string; // optional weaknesses
+	// Ratings (1-10 scale, higher is better)
+	abstract?: number;     // big-picture thinking, architectural reasoning
+	detailed?: number;     // step-by-step logic, edge cases, debugging
+	toolUse?: number;      // reliable multi-step file/code operations
+	instruction?: number;  // follows instructions precisely
+	creativity?: number;   // novel approaches, writing quality
+	speed?: number;        // response time
+	cost?: number;         // cost efficiency (higher = cheaper)
+	context?: number;      // context window size
 }
 
 function parseSimpleFrontmatter(content: string): { frontmatter: Record<string, string>; body: string } {
@@ -204,10 +213,23 @@ function loadModelSkills(): ModelSkill[] {
 		
 		const { frontmatter } = parseSimpleFrontmatter(content);
 		if (frontmatter.model && frontmatter.for) {
+			const parseNum = (v: string | undefined): number | undefined => {
+				if (!v) return undefined;
+				const n = parseInt(v, 10);
+				return isNaN(n) ? undefined : n;
+			};
 			skills.push({
 				prefix: frontmatter.model.toLowerCase(),
 				for: frontmatter.for,
 				weaknesses: frontmatter.weaknesses,
+				abstract: parseNum(frontmatter.abstract),
+				detailed: parseNum(frontmatter.detailed),
+				toolUse: parseNum(frontmatter["tool-use"]),
+				instruction: parseNum(frontmatter.instruction),
+				creativity: parseNum(frontmatter.creativity),
+				speed: parseNum(frontmatter.speed),
+				cost: parseNum(frontmatter.cost),
+				context: parseNum(frontmatter.context),
 			});
 		}
 	}
@@ -381,17 +403,37 @@ export default function (pi: ExtensionAPI) {
 	const enabledModels = readEnabledModels();
 	
 	// Build model list with skills annotations as XML
+	const axesLegend = `  <axes description="ratings 1-10, higher is better">
+    <axis name="abstract" description="big-picture thinking, architectural reasoning, conceptual leaps" />
+    <axis name="detailed" description="step-by-step logic, edge cases, debugging, attention to detail" />
+    <axis name="tool-use" description="reliable multi-step file/code operations" />
+    <axis name="instruction" description="follows instructions precisely, format compliance" />
+    <axis name="creativity" description="novel approaches, writing quality, thinking outside the box" />
+    <axis name="speed" description="response time" />
+    <axis name="cost" description="cost efficiency (higher = cheaper)" />
+    <axis name="context" description="context window size" />
+  </axes>`;
+
 	const formatModelXml = (modelId: string): string => {
 		const skill = getModelSkill(skills, modelId);
 		if (skill) {
-			const weakAttr = skill.weaknesses ? ` weaknesses="${skill.weaknesses}"` : "";
-			return `  <model id="${modelId}" for="${skill.for}"${weakAttr} />`;
+			const attrs: string[] = [`id="${modelId}"`, `for="${skill.for}"`];
+			if (skill.weaknesses) attrs.push(`weaknesses="${skill.weaknesses}"`);
+			if (skill.abstract !== undefined) attrs.push(`abstract="${skill.abstract}"`);
+			if (skill.detailed !== undefined) attrs.push(`detailed="${skill.detailed}"`);
+			if (skill.toolUse !== undefined) attrs.push(`tool-use="${skill.toolUse}"`);
+			if (skill.instruction !== undefined) attrs.push(`instruction="${skill.instruction}"`);
+			if (skill.creativity !== undefined) attrs.push(`creativity="${skill.creativity}"`);
+			if (skill.speed !== undefined) attrs.push(`speed="${skill.speed}"`);
+			if (skill.cost !== undefined) attrs.push(`cost="${skill.cost}"`);
+			if (skill.context !== undefined) attrs.push(`context="${skill.context}"`);
+			return `  <model ${attrs.join(" ")} />`;
 		}
 		return `  <model id="${modelId}" />`;
 	};
 	
 	const modelListXml = enabledModels.length > 0
-		? `<available-models>\n${enabledModels.map(formatModelXml).join("\n")}\n</available-models>`
+		? `<available-models>\n${axesLegend}\n${enabledModels.map(formatModelXml).join("\n")}\n</available-models>`
 		: "(all models with API keys)";
 	
 	const modelListShort = enabledModels.join(", ") || "(all models with API keys)";
