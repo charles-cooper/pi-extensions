@@ -476,6 +476,9 @@ async function runSubagent(
 ): Promise<SubagentResult> {
 	const args = ["--mode", "json", "-p", "--no-session", "--model", model];
 
+	// Let the subagent know it's a subagent to discourage recursive spawning
+	args.push("--append-system-prompt", "You are a subagent. You can spawn further subagents if truly needed, but prefer to complete tasks directly.");
+
 	if (tools && tools.length > 0) {
 		// Tool names are case-sensitive (lowercase)
 		args.push("--tools", tools.map(t => t.toLowerCase()).join(","));
