@@ -131,6 +131,11 @@ function getFinalOutput(messages: Message[]): string {
 	return "";
 }
 
+/** Get messages for display, including partial streaming message if present */
+function getDisplayMessages(r: SubagentResult): Message[] {
+	return r.partialMessage ? [r.partialMessage, ...r.messages] : r.messages;
+}
+
 function shortenPath(p: string): string {
 	const home = os.homedir();
 	return p.startsWith(home) ? `~${p.slice(home.length)}` : p;
@@ -519,6 +524,8 @@ async function runSubagent(
 			if (event.type === "message_end" && event.message) {
 				const msg = event.message as Message;
 				result.messages.push(msg);
+				// Clear partial - it's now in messages
+				result.partialMessage = undefined;
 				if (msg.role === "assistant") {
 					result.usage.turns++;
 					// Update output to latest text
@@ -857,10 +864,8 @@ export default function (pi: ExtensionAPI) {
 				const icon = r.exitCode === -1
 					? theme.fg("warning", "⏳")
 					: isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
-				// Include partialMessage for intermediate display during streaming
-				const msgsToDisplay = r.partialMessage ? [r.partialMessage, ...r.messages] : r.messages;
-				const displayItems = getDisplayItems(msgsToDisplay);
-				const finalOutput = getFinalOutput(r.messages); // Only final output from completed messages
+				const displayItems = getDisplayItems(getDisplayMessages(r));
+				const finalOutput = getFinalOutput(r.messages);
 				const toolCalls = displayItems.filter((i) => i.type === "toolCall");
 
 				const container = new Container();
@@ -920,10 +925,8 @@ export default function (pi: ExtensionAPI) {
 
 				if (expanded) {
 					const container = new Container();
-					// Include partialMessage for intermediate display during streaming
-					const msgsToDisplay = r.partialMessage ? [r.partialMessage, ...r.messages] : r.messages;
-					const displayItems = getDisplayItems(msgsToDisplay);
-					const finalOutput = getFinalOutput(r.messages); // Only final output from completed messages
+					const displayItems = getDisplayItems(getDisplayMessages(r));
+					const finalOutput = getFinalOutput(r.messages);
 					const toolCalls = displayItems.filter((i) => i.type === "toolCall");
 
 					// Just show status icon + error if any (model/task already in renderCall)
@@ -1032,9 +1035,7 @@ export default function (pi: ExtensionAPI) {
 					preview = (r.output.length > 60 ? r.output.slice(0, 60) + "..." : r.output).split("\n")[0];
 				} else if (r.exitCode === -1) {
 					// Show tool call activity while running
-					// Check partialMessage first (has in-progress tool calls), then completed messages
-					const msgsToCheck = r.partialMessage ? [r.partialMessage, ...r.messages] : r.messages;
-					const toolCalls = getDisplayItems(msgsToCheck).filter(i => i.type === "toolCall");
+					const toolCalls = getDisplayItems(getDisplayMessages(r)).filter(i => i.type === "toolCall");
 					if (toolCalls.length > 0) {
 						const last = toolCalls[toolCalls.length - 1];
 						if (last.type === "toolCall") {
