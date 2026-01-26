@@ -36,6 +36,8 @@ interface SubagentResult {
 	messages: Message[];
 	/** Partial message during streaming (contains in-progress tool calls) */
 	partialMessage?: Message;
+	/** Currently executing tool (for live status) */
+	currentTool?: { type: string; name: string; args: unknown };
 	usage: UsageStats;
 	stopReason?: string;
 	errorMessage?: string;
@@ -554,6 +556,11 @@ async function runSubagent(
 
 			// Capture tool execution events for live updates during tool runs
 			if (event.type === "tool_execution_start" || event.type === "tool_execution_update" || event.type === "tool_execution_end") {
+				// Store current tool execution state for display
+				result.currentTool = { type: event.type, name: event.toolName, args: event.args };
+				if (event.type === "tool_execution_end") {
+					result.currentTool = undefined; // Clear when done
+				}
 				emitUpdate();
 			}
 		};
@@ -1046,19 +1053,16 @@ export default function (pi: ExtensionAPI) {
 					const toolCalls = getDisplayItems(getDisplayMessages(r)).filter(i => i.type === "toolCall");
 					if (toolCalls.length > 0) {
 						const last = toolCalls[toolCalls.length - 1];
-						if (last.type === "toolCall") {
-							const name = last.name.toLowerCase();
-							if (name === "bash") {
-								const cmd = (last.args.command as string) || "";
-								preview = `$ ${cmd.slice(0, 40)}${cmd.length > 40 ? "..." : ""}`;
-							} else if (name === "read" || name === "write" || name === "edit") {
-								const p = shortenPath((last.args.path || last.args.file_path || "") as string);
-								preview = `${name} ${p}`;
-							} else {
-								preview = `${name}...`;
-							}
+						// last is guaranteed to be toolCall type from filter
+						const name = last.name.toLowerCase();
+						if (name === "bash") {
+							const cmd = (last.args.command as string) ?? "";
+							preview = `$ ${cmd.slice(0, 40)}${cmd.length > 40 ? "..." : ""}`;
+						} else if (name === "read" || name === "write" || name === "edit") {
+							const p = shortenPath((last.args.path || last.args.file_path || "") as string);
+							preview = `${name} ${p}`;
 						} else {
-							preview = "(running...)";
+							preview = `${name}...`;
 						}
 					} else {
 						preview = "(starting...)";
