@@ -485,7 +485,7 @@ async function runSubagent(
 		model,
 		task,
 		context,
-		exitCode: 0,
+		exitCode: -1, // -1 = still running
 		output: "",
 		messages: [],
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 },
