@@ -10,7 +10,7 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type ExtensionAPI, type ExtensionContext, getMarkdownTheme } from "@mariozechner/pi-coding-agent";
+import { type ExtensionAPI, type ExtensionContext, getMarkdownTheme, getLanguageFromPath, highlightCode } from "@mariozechner/pi-coding-agent";
 import type { Message } from "@mariozechner/pi-ai";
 import { Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
@@ -91,12 +91,12 @@ function getFinalOutput(messages: Message[]): string {
 	return "";
 }
 
-function formatToolCall(name: string, args: Record<string, unknown>, themeFg: (color: string, text: string) => string): string {
-	const shortenPath = (p: string) => {
-		const home = os.homedir();
-		return p.startsWith(home) ? `~${p.slice(home.length)}` : p;
-	};
+function shortenPath(p: string): string {
+	const home = os.homedir();
+	return p.startsWith(home) ? `~${p.slice(home.length)}` : p;
+}
 
+function formatToolCall(name: string, args: Record<string, unknown>, themeFg: (color: string, text: string) => string): string {
 	switch (name.toLowerCase()) {
 		case "bash": {
 			const cmd = (args.command as string) || "...";
@@ -121,6 +121,110 @@ function formatToolCall(name: string, args: Record<string, unknown>, themeFg: (c
 			return themeFg("accent", name) + themeFg("dim", ` ${preview}`);
 		}
 	}
+}
+
+/** Render a tool call with full details (for expanded view) */
+function renderToolCallExpanded(
+	name: string,
+	args: Record<string, unknown>,
+	theme: { fg: (color: string, text: string) => string; bold: (text: string) => string }
+): Container {
+	const container = new Container();
+	const lowerName = name.toLowerCase();
+
+	switch (lowerName) {
+		case "bash": {
+			const cmd = (args.command as string) || "...";
+			const timeout = args.timeout as number | undefined;
+			let header = theme.fg("muted", "$ ") + theme.fg("toolOutput", cmd);
+			if (timeout) header += theme.fg("dim", ` (timeout ${timeout}s)`);
+			container.addChild(new Text(header, 0, 0));
+			break;
+		}
+		case "read": {
+			const rawPath = (args.path || args.file_path || "...") as string;
+			const filePath = shortenPath(rawPath);
+			const offset = args.offset as number | undefined;
+			const limit = args.limit as number | undefined;
+			let pathDisplay = theme.fg("accent", filePath);
+			if (offset !== undefined || limit !== undefined) {
+				const startLine = offset ?? 1;
+				const endLine = limit !== undefined ? startLine + limit - 1 : "";
+				pathDisplay += theme.fg("warning", `:${startLine}${endLine ? `-${endLine}` : ""}`);
+			}
+			container.addChild(new Text(theme.fg("muted", "read ") + pathDisplay, 0, 0));
+			break;
+		}
+		case "write": {
+			const rawPath = (args.path || args.file_path || "...") as string;
+			const filePath = shortenPath(rawPath);
+			const content = (args.content as string) || "";
+			container.addChild(new Text(theme.fg("muted", "write ") + theme.fg("accent", filePath), 0, 0));
+			if (content) {
+				const lang = getLanguageFromPath(rawPath);
+				const lines = content.split("\n");
+				const maxLines = 15;
+				const displayLines = lines.slice(0, maxLines);
+				const remaining = lines.length - maxLines;
+				
+				if (lang) {
+					const highlighted = highlightCode(displayLines.join("\n"), lang);
+					container.addChild(new Text("\n" + highlighted.join("\n"), 0, 0));
+				} else {
+					container.addChild(new Text("\n" + displayLines.map(l => theme.fg("toolOutput", l)).join("\n"), 0, 0));
+				}
+				if (remaining > 0) {
+					container.addChild(new Text(theme.fg("muted", `\n... (${remaining} more lines)`), 0, 0));
+				}
+			}
+			break;
+		}
+		case "edit": {
+			const rawPath = (args.path || args.file_path || "...") as string;
+			const filePath = shortenPath(rawPath);
+			const oldText = (args.oldText as string) || "";
+			const newText = (args.newText as string) || "";
+			container.addChild(new Text(theme.fg("muted", "edit ") + theme.fg("accent", filePath), 0, 0));
+			
+			// Show old/new text as simple diff-like display
+			if (oldText || newText) {
+				const allOldLines = oldText.split("\n");
+				const allNewLines = newText.split("\n");
+				const oldLines = allOldLines.slice(0, 10);
+				const newLines = allNewLines.slice(0, 10);
+				const oldRemaining = allOldLines.length - oldLines.length;
+				const newRemaining = allNewLines.length - newLines.length;
+				
+				if (oldText) {
+					container.addChild(new Text(oldLines.map(l => theme.fg("error", "- " + l)).join("\n"), 0, 0));
+					if (oldRemaining > 0) {
+						container.addChild(new Text(theme.fg("muted", `  ... (${oldRemaining} more lines)`), 0, 0));
+					}
+				}
+				if (newText) {
+					container.addChild(new Text(newLines.map(l => theme.fg("success", "+ " + l)).join("\n"), 0, 0));
+					if (newRemaining > 0) {
+						container.addChild(new Text(theme.fg("muted", `  ... (${newRemaining} more lines)`), 0, 0));
+					}
+				}
+			}
+			break;
+		}
+		default: {
+			// For unknown tools, show name and formatted JSON args
+			container.addChild(new Text(theme.fg("accent", theme.bold(name)), 0, 0));
+			const argsStr = JSON.stringify(args, null, 2);
+			const lines = argsStr.split("\n").slice(0, 20);
+			const remaining = argsStr.split("\n").length - lines.length;
+			container.addChild(new Text(theme.fg("dim", lines.join("\n")), 0, 0));
+			if (remaining > 0) {
+				container.addChild(new Text(theme.fg("muted", `... (${remaining} more lines)`), 0, 0));
+			}
+			break;
+		}
+	}
+
+	return container;
 }
 
 function formatTokens(n: number): string {
@@ -644,7 +748,7 @@ export default function (pi: ExtensionAPI) {
 				return total;
 			};
 
-			const renderSingleResult = (r: SubagentResult, showHeader: boolean) => {
+			const renderSingleResult = (r: SubagentResult, showHeader: boolean, showExpanded: boolean) => {
 				const isError = r.exitCode !== 0 || r.stopReason === "error" || r.stopReason === "aborted";
 				const icon = r.exitCode === -1
 					? theme.fg("warning", "⏳")
@@ -671,10 +775,15 @@ export default function (pi: ExtensionAPI) {
 				// Tool calls
 				for (const item of toolCalls) {
 					if (item.type === "toolCall") {
-						container.addChild(new Text(
-							theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, theme.fg.bind(theme)),
-							0, 0
-						));
+						if (showExpanded) {
+							container.addChild(new Spacer(1));
+							container.addChild(renderToolCallExpanded(item.name, item.args, theme));
+						} else {
+							container.addChild(new Text(
+								theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, theme.fg.bind(theme)),
+								0, 0
+							));
+						}
 					}
 				}
 
@@ -733,10 +842,8 @@ export default function (pi: ExtensionAPI) {
 						container.addChild(new Text(theme.fg("muted", "─── Tool Calls ───"), 0, 0));
 						for (const item of toolCalls) {
 							if (item.type === "toolCall") {
-								container.addChild(new Text(
-									theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, theme.fg.bind(theme)),
-									0, 0
-								));
+								container.addChild(new Spacer(1));
+								container.addChild(renderToolCallExpanded(item.name, item.args, theme));
 							}
 						}
 					}
@@ -798,7 +905,7 @@ export default function (pi: ExtensionAPI) {
 				for (const r of details.results) {
 					container.addChild(new Spacer(1));
 					container.addChild(new Text(theme.fg("muted", "────────────────────"), 0, 0));
-					container.addChild(renderSingleResult(r, true));
+					container.addChild(renderSingleResult(r, true, true));
 				}
 
 				const totalUsage = aggregateUsage(details.results);
