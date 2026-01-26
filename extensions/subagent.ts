@@ -1020,9 +1020,34 @@ export default function (pi: ExtensionAPI) {
 				const rIcon = r.exitCode === -1
 					? theme.fg("warning", "⏳")
 					: isResultError(r) ? theme.fg("error", "✗") : theme.fg("success", "✓");
-				const preview = r.output
-					? (r.output.length > 60 ? r.output.slice(0, 60) + "..." : r.output).split("\n")[0]
-					: r.exitCode === -1 ? "(running...)" : "(no output)";
+				let preview: string;
+				if (r.output) {
+					preview = (r.output.length > 60 ? r.output.slice(0, 60) + "..." : r.output).split("\n")[0];
+				} else if (r.exitCode === -1) {
+					// Show tool call activity while running
+					const toolCalls = getDisplayItems(r.messages).filter(i => i.type === "toolCall");
+					if (toolCalls.length > 0) {
+						const last = toolCalls[toolCalls.length - 1];
+						if (last.type === "toolCall") {
+							const name = last.name.toLowerCase();
+							if (name === "bash") {
+								const cmd = (last.args.command as string) || "";
+								preview = `$ ${cmd.slice(0, 40)}${cmd.length > 40 ? "..." : ""}`;
+							} else if (name === "read" || name === "write" || name === "edit") {
+								const p = shortenPath((last.args.path || last.args.file_path || "") as string);
+								preview = `${name} ${p}`;
+							} else {
+								preview = `${name}...`;
+							}
+						} else {
+							preview = "(running...)";
+						}
+					} else {
+						preview = "(starting...)";
+					}
+				} else {
+					preview = "(no output)";
+				}
 				text += `\n${rIcon} ${theme.fg("accent", r.model)} ${theme.fg("dim", preview)}`;
 			}
 			if (!isRunning) {
