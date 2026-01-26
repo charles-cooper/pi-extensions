@@ -161,20 +161,25 @@ function renderToolCallExpanded(
 			const content = (args.content as string) || "";
 			container.addChild(new Text(theme.fg("muted", "write ") + theme.fg("accent", filePath), 0, 0));
 			if (content) {
-				const lang = getLanguageFromPath(rawPath);
 				const lines = content.split("\n");
 				const maxLines = 15;
 				const displayLines = lines.slice(0, maxLines);
 				const remaining = lines.length - maxLines;
 				
-				if (lang) {
-					const highlighted = highlightCode(displayLines.join("\n"), lang);
-					container.addChild(new Text("\n" + highlighted.join("\n"), 0, 0));
-				} else {
-					container.addChild(new Text("\n" + displayLines.map(l => theme.fg("toolOutput", l)).join("\n"), 0, 0));
+				// Try syntax highlighting, fall back to plain
+				const lang = getLanguageFromPath(rawPath);
+				try {
+					if (lang) {
+						const highlighted = highlightCode(displayLines.join("\n"), lang);
+						container.addChild(new Text(highlighted.join("\n"), 0, 0));
+					} else {
+						container.addChild(new Text(theme.fg("toolOutput", displayLines.join("\n")), 0, 0));
+					}
+				} catch {
+					container.addChild(new Text(theme.fg("toolOutput", displayLines.join("\n")), 0, 0));
 				}
 				if (remaining > 0) {
-					container.addChild(new Text(theme.fg("muted", `\n... (${remaining} more lines)`), 0, 0));
+					container.addChild(new Text(theme.fg("muted", `... (${remaining} more lines)`), 0, 0));
 				}
 			}
 			break;
