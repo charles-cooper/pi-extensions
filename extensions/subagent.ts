@@ -565,6 +565,23 @@ async function runSubagent(
 				emitUpdate();
 			}
 
+			// Capture nested subagent costs from tool results
+			if (event.type === "tool_execution_end" && event.toolName === "subagent") {
+				const details = event.result?.details as SubagentDetails | undefined;
+				if (details?.results) {
+					for (const r of details.results) {
+						if (r.usage) {
+							result.usage.input += r.usage.input || 0;
+							result.usage.output += r.usage.output || 0;
+							result.usage.cacheRead += r.usage.cacheRead || 0;
+							result.usage.cacheWrite += r.usage.cacheWrite || 0;
+							result.usage.cost += r.usage.cost || 0;
+							result.usage.turns += r.usage.turns || 0;
+						}
+					}
+				}
+			}
+
 
 		};
 
