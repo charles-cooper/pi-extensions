@@ -148,3 +148,35 @@ Always read files before editing.
 ### Status bar
 
 Shows which prompt file is active: `📝 SYSTEM.claude.md +1 append`
+
+---
+
+## extensions/taskman-compaction.ts
+
+Replaces auto-compaction with taskman handoff format.
+
+### Why?
+
+Default compaction uses a rigid structured format. This extension:
+- Uses the `/handoff` skill for compaction summaries
+- Produces breadcrumbs (pointers) instead of copying content
+- Integrates with taskman context (STATUS.md, MEDIUMTERM_MEM.md)
+- Keeps summaries lean with progressive disclosure
+
+### Usage
+
+Add to `~/.pi/settings.jsonl`:
+```json
+{"extensions": ["~/pi-extensions/extensions/taskman-compaction.ts"]}
+```
+
+### Earlier compaction
+
+Default compaction triggers at ~92% context. To trigger earlier (~70%):
+```json
+{"compaction": {"reserveTokens": 60000}}
+```
+
+### Requirements
+
+Requires the taskman skill at `~/.pi/agent/skills/taskman/handoff.md`.
