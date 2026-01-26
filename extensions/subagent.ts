@@ -154,6 +154,75 @@ function readEnabledModels(): string[] {
 	}
 }
 
+// Model skills: prefix -> description
+interface ModelSkill {
+	prefix: string;      // e.g. "openrouter/openai" or "anthropic/claude-sonnet-4-5"
+	for: string;         // short description of strengths
+	weaknesses?: string; // optional weaknesses
+}
+
+function parseSimpleFrontmatter(content: string): { frontmatter: Record<string, string>; body: string } {
+	const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
+	if (!match) return { frontmatter: {}, body: content };
+	
+	const frontmatter: Record<string, string> = {};
+	for (const line of match[1].split(/\r?\n/)) {
+		const colonIdx = line.indexOf(":");
+		if (colonIdx > 0) {
+			const key = line.slice(0, colonIdx).trim();
+			const value = line.slice(colonIdx + 1).trim();
+			frontmatter[key] = value;
+		}
+	}
+	return { frontmatter, body: match[2] };
+}
+
+function loadModelSkills(): ModelSkill[] {
+	const skills: ModelSkill[] = [];
+	const skillsDir = path.join(os.homedir(), ".pi", "agent", "model-skills");
+	
+	if (!fs.existsSync(skillsDir)) return skills;
+	
+	let entries: fs.Dirent[];
+	try {
+		entries = fs.readdirSync(skillsDir, { withFileTypes: true });
+	} catch {
+		return skills;
+	}
+	
+	for (const entry of entries) {
+		if (!entry.name.endsWith(".md")) continue;
+		if (!entry.isFile()) continue;
+		
+		const filePath = path.join(skillsDir, entry.name);
+		let content: string;
+		try {
+			content = fs.readFileSync(filePath, "utf-8");
+		} catch {
+			continue;
+		}
+		
+		const { frontmatter } = parseSimpleFrontmatter(content);
+		if (frontmatter.model && frontmatter.for) {
+			skills.push({
+				prefix: frontmatter.model.toLowerCase(),
+				for: frontmatter.for,
+				weaknesses: frontmatter.weaknesses,
+			});
+		}
+	}
+	
+	// Sort by prefix length descending (more specific matches first)
+	skills.sort((a, b) => b.prefix.length - a.prefix.length);
+	return skills;
+}
+
+function getModelSkill(skills: ModelSkill[], modelId: string): ModelSkill | undefined {
+	const id = modelId.toLowerCase();
+	// Substring match, longest match wins (skills already sorted by length desc)
+	return skills.find(s => id.includes(s.prefix));
+}
+
 function getAvailableModels(ctx: ExtensionContext): Map<string, { provider: string; id: string }> {
 	const models = new Map<string, { provider: string; id: string }>();
 	const enabledModels = readEnabledModels();
@@ -307,11 +376,25 @@ async function runSubagent(
 }
 
 export default function (pi: ExtensionAPI) {
-	// Build description with available models from settings
+	// Load model skills and enabled models
+	const skills = loadModelSkills();
 	const enabledModels = readEnabledModels();
-	const modelList = enabledModels.length > 0 
-		? enabledModels.join(", ") 
+	
+	// Build model list with skills annotations as XML
+	const formatModelXml = (modelId: string): string => {
+		const skill = getModelSkill(skills, modelId);
+		if (skill) {
+			const weakAttr = skill.weaknesses ? ` weaknesses="${skill.weaknesses}"` : "";
+			return `  <model id="${modelId}" for="${skill.for}"${weakAttr} />`;
+		}
+		return `  <model id="${modelId}" />`;
+	};
+	
+	const modelListXml = enabledModels.length > 0
+		? `<available-models>\n${enabledModels.map(formatModelXml).join("\n")}\n</available-models>`
 		: "(all models with API keys)";
+	
+	const modelListShort = enabledModels.join(", ") || "(all models with API keys)";
 
 	const TaskItem = Type.Object({
 		model: Type.String({ description: "Model ID" }),
@@ -324,10 +407,10 @@ export default function (pi: ExtensionAPI) {
 		name: "subagent",
 		label: "Subagent",
 		description:
-			`Spawn a subagent with isolated context. Params: model (full model ID from available models), task (instruction), context (optional XML), tools (optional array). Available models: ${modelList}`,
+			`Spawn a subagent with isolated context. Params: model, task, context (optional), tools (optional array).\n\n${modelListXml}`,
 		parameters: Type.Object({
 			// Single mode
-			model: Type.Optional(Type.String({ description: `Model ID. Available: ${modelList}` })),
+			model: Type.Optional(Type.String({ description: `Model ID. Available: ${modelListShort}` })),
 			task: Type.Optional(Type.String({ description: "The task instruction for the subagent" })),
 			context: Type.Optional(Type.String({ description: "Optional XML-structured context to pass" })),
 			tools: Type.Optional(Type.Array(Type.String(), { description: "Tool names to enable (default: all)" })),
