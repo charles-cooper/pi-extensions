@@ -907,8 +907,11 @@ export default function (pi: ExtensionAPI) {
 			// Single mode
 			if (details.mode === "single") {
 				const r = details.results[0];
-				const isError = isResultError(r);
-				const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
+				const isRunning = r.exitCode === -1;
+				const isError = !isRunning && isResultError(r);
+				const icon = isRunning
+					? theme.fg("warning", "⏳")
+					: isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
 
 				if (expanded) {
 					const container = new Container();
@@ -1026,7 +1029,7 @@ export default function (pi: ExtensionAPI) {
 				const totalUsage = aggregateUsage(details.results);
 				text += `\n${theme.fg("dim", `Total: ${formatUsage(totalUsage, "")}`)}`;
 			}
-			if (!expanded && !isRunning) {
+			if (!expanded) {
 				text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
 			}
 			return new Text(text, 0, 0);
