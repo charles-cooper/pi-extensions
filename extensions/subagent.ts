@@ -1005,7 +1005,7 @@ export default function (pi: ExtensionAPI) {
 				? `${successCount + failCount}/${details.results.length} done, ${running} running`
 				: `${successCount}/${details.results.length} succeeded`;
 
-			if (expanded && !isRunning) {
+			if (expanded) {
 				const container = new Container();
 				container.addChild(new Text(
 					`${icon} ${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("accent", `parallel ${status}`)}`,
@@ -1018,9 +1018,11 @@ export default function (pi: ExtensionAPI) {
 					container.addChild(renderSingleResult(r, true, true));
 				}
 
-				const totalUsage = aggregateUsage(details.results);
-				container.addChild(new Spacer(1));
-				container.addChild(new Text(theme.fg("dim", `Total: ${formatUsage(totalUsage, "")}`), 0, 0));
+				if (!isRunning) {
+					const totalUsage = aggregateUsage(details.results);
+					container.addChild(new Spacer(1));
+					container.addChild(new Text(theme.fg("dim", `Total: ${formatUsage(totalUsage, "")}`), 0, 0));
+				}
 
 				return container;
 			}
