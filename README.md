@@ -16,9 +16,48 @@ Copies all `extensions/*.ts` to `~/.pi/agent/extensions/`.
 
 Spawn subagents with isolated context. The LLM can delegate tasks to other models.
 
+- Single or parallel execution (up to 8 tasks, 4 concurrent)
 - Uses scoped models from `~/.pi/agent/settings.json`
 - Supports tool restrictions per subagent
 - Streams progress and tracks usage/cost
+- Model skills annotations help pick the right model
+
+### Model Skills
+
+Define model capabilities in `~/.pi/agent/model-skills/*.md`:
+
+```markdown
+# ~/.pi/agent/model-skills/claude-sonnet.md
+---
+model: claude-sonnet
+for: tool use, coding, fast execution
+weaknesses: complex abstract reasoning
+abstract: 6
+detailed: 7
+tool-use: 9
+instruction: 8
+creativity: 6
+speed: 8
+cost: 7
+context: 7
+---
+```
+
+**Fields:**
+- `model`: substring to match (longest match wins)
+- `for`: short description of strengths
+- `weaknesses`: optional limitations
+- Ratings (1-10, higher is better):
+  - `abstract`: big-picture thinking, architectural reasoning
+  - `detailed`: step-by-step logic, edge cases, debugging
+  - `tool-use`: reliable multi-step file/code operations
+  - `instruction`: follows instructions precisely
+  - `creativity`: novel approaches, writing quality
+  - `speed`: response time
+  - `cost`: cost efficiency (higher = cheaper)
+  - `context`: context window size
+
+The tool description shows an XML schema with all axes defined, helping the orchestrating agent pick the right model for each task.
 
 ---
 
