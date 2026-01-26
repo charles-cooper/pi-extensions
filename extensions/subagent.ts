@@ -477,7 +477,8 @@ async function runSubagent(
 	const args = ["--mode", "json", "-p", "--no-session", "--model", model];
 
 	if (tools && tools.length > 0) {
-		args.push("--tools", tools.join(","));
+		// Tool names are case-sensitive (lowercase)
+		args.push("--tools", tools.map(t => t.toLowerCase()).join(","));
 	}
 
 	// Build the prompt
