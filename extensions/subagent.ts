@@ -16,6 +16,9 @@ import { Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 
 const MAX_PARALLEL = 8;
+
+/** Custom entry type for persisting subagent usage */
+const SUBAGENT_USAGE_ENTRY_TYPE = "subagent_usage";
 const MAX_CONCURRENCY = 4;
 
 interface UsageStats {
@@ -25,6 +28,13 @@ interface UsageStats {
 	cacheWrite: number;
 	cost: number;
 	turns: number;
+}
+
+/** Data stored in custom session entries for subagent usage tracking */
+interface SubagentUsageEntry {
+	usage: UsageStats;
+	model: string;
+	timestamp: number;
 }
 
 interface SubagentResult {
@@ -620,6 +630,57 @@ async function runSubagent(
 }
 
 export default function (pi: ExtensionAPI) {
+	// Track cumulative subagent usage across the session
+	let cumulativeUsage: UsageStats = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
+
+	// Helper to record usage and update status
+	const recordUsage = (usage: UsageStats, model: string, ctx: ExtensionContext) => {
+		cumulativeUsage.input += usage.input;
+		cumulativeUsage.output += usage.output;
+		cumulativeUsage.cacheRead += usage.cacheRead;
+		cumulativeUsage.cacheWrite += usage.cacheWrite;
+		cumulativeUsage.cost += usage.cost;
+		cumulativeUsage.turns += usage.turns;
+
+		// Persist to session
+		pi.appendEntry<SubagentUsageEntry>(SUBAGENT_USAGE_ENTRY_TYPE, {
+			usage,
+			model,
+			timestamp: Date.now(),
+		});
+
+		// Update footer status
+		if (cumulativeUsage.cost > 0) {
+			ctx.ui.setStatus("subagent", `subagents: $${cumulativeUsage.cost.toFixed(3)}`);
+		}
+	};
+
+	// Restore cumulative usage from session entries on load
+	const restoreUsageFromSession = (ctx: ExtensionContext) => {
+		cumulativeUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
+		for (const entry of ctx.sessionManager.getEntries()) {
+			if (entry.type === "custom" && entry.customType === SUBAGENT_USAGE_ENTRY_TYPE) {
+				const data = entry.data as SubagentUsageEntry;
+				if (data?.usage) {
+					cumulativeUsage.input += data.usage.input;
+					cumulativeUsage.output += data.usage.output;
+					cumulativeUsage.cacheRead += data.usage.cacheRead;
+					cumulativeUsage.cacheWrite += data.usage.cacheWrite;
+					cumulativeUsage.cost += data.usage.cost;
+					cumulativeUsage.turns += data.usage.turns;
+				}
+			}
+		}
+		if (cumulativeUsage.cost > 0) {
+			ctx.ui.setStatus("subagent", `subagents: $${cumulativeUsage.cost.toFixed(3)}`);
+		}
+	};
+
+	// Restore on session start
+	pi.on("session_start", (_, ctx) => {
+		restoreUsageFromSession(ctx);
+	});
+
 	// Load model skills and enabled models
 	const skills = loadModelSkills();
 	const enabledModels = readEnabledModels();
@@ -771,6 +832,13 @@ export default function (pi: ExtensionAPI) {
 					return `${header}\n${body}`;
 				});
 
+				// Record usage for all subagents
+				for (const r of allResults) {
+					if (r.usage.cost > 0 || r.usage.input > 0) {
+						recordUsage(r.usage, r.model, ctx);
+					}
+				}
+
 				return {
 					content: [{ type: "text", text: `${successCount}/${allResults.length} succeeded\n\n${fullOutputs.join("\n\n---\n\n")}` }],
 					details: { mode: "parallel", results: allResults, availableModels } as SubagentDetails,
@@ -802,6 +870,11 @@ export default function (pi: ExtensionAPI) {
 							})
 					: undefined,
 			);
+
+			// Record usage
+			if (result.usage.cost > 0 || result.usage.input > 0) {
+				recordUsage(result.usage, result.model, ctx);
+			}
 
 			return {
 				content: [{ type: "text", text: result.output || result.errorMessage || "(no output)" }],
