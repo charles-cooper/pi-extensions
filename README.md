@@ -59,6 +59,25 @@ context: 7
 
 The tool description shows an XML schema with all axes defined, helping the orchestrating agent pick the right model for each task.
 
+### Usage
+
+**Via LLM tool call:**
+```
+Single: { model: "anthropic/claude-sonnet-4-5", task: "..." }
+Parallel: { tasks: [{ model: "...", task: "..." }, ...] }
+```
+
+**Via slash command:**
+```
+/subagent claude-sonnet review this PR
+```
+
+### Rendering
+
+- Collapsed view shows output preview (5 lines)
+- Expanded view (Ctrl+O) shows task, tool calls, full output
+- Status icons: ✓ success, ✗ error, ⏳ running, ◐ partial
+
 ---
 
 ## extensions/per-model-system-prompt.ts
