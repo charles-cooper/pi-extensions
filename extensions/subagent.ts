@@ -36,8 +36,6 @@ interface SubagentResult {
 	messages: Message[];
 	/** Partial message during streaming (contains in-progress tool calls) */
 	partialMessage?: Message;
-	/** Currently executing tool (for live status) */
-	currentTool?: { type: string; name: string; args: unknown };
 	usage: UsageStats;
 	stopReason?: string;
 	errorMessage?: string;
@@ -554,15 +552,7 @@ async function runSubagent(
 				emitUpdate();
 			}
 
-			// Capture tool execution events for live updates during tool runs
-			if (event.type === "tool_execution_start" || event.type === "tool_execution_update" || event.type === "tool_execution_end") {
-				// Store current tool execution state for display
-				result.currentTool = { type: event.type, name: event.toolName, args: event.args };
-				if (event.type === "tool_execution_end") {
-					result.currentTool = undefined; // Clear when done
-				}
-				emitUpdate();
-			}
+
 		};
 
 		proc.stdout.on("data", (data) => {
@@ -745,7 +735,7 @@ export default function (pi: ExtensionAPI) {
 						const running = allResults.length - done;
 						onUpdate({
 							content: [{ type: "text", text: `${done}/${allResults.length} done, ${running} running...` }],
-							details: { mode: "parallel", results: [...allResults], availableModels } as SubagentDetails,
+							details: { mode: "parallel", results: allResults, availableModels } as SubagentDetails,
 						});
 					}
 				};
