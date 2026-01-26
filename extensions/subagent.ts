@@ -553,12 +553,34 @@ async function runSubagent(
 			stderr += data.toString();
 		});
 
-		proc.on("close", (code) => {
+		let hasExited = false;
+		let killTimeout: ReturnType<typeof setTimeout> | undefined;
+		
+		const abortHandler = () => {
+			wasAborted = true;
+			proc.kill("SIGTERM");
+			killTimeout = setTimeout(() => {
+				if (!hasExited) proc.kill("SIGKILL");
+			}, 3000);
+		};
+
+		proc.on("close", (code, sig) => {
+			hasExited = true;
+			if (killTimeout) clearTimeout(killTimeout);
+			if (signal) signal.removeEventListener("abort", abortHandler);
+			
 			if (buffer.trim()) processLine(buffer);
-			if (code !== 0 && !result.errorMessage) {
+			
+			// Handle signal kills (code is null when killed by signal)
+			if (sig) {
+				if (!result.errorMessage) result.errorMessage = `Killed by ${sig}`;
+				resolve(1);
+			} else if (code !== 0 && !result.errorMessage) {
 				result.errorMessage = stderr.trim() || `Exit code ${code}`;
+				resolve(code ?? 1);
+			} else {
+				resolve(code ?? 0);
 			}
-			resolve(code ?? 0);
 		});
 
 		proc.on("error", (err) => {
@@ -567,15 +589,8 @@ async function runSubagent(
 		});
 
 		if (signal) {
-			const kill = () => {
-				wasAborted = true;
-				proc.kill("SIGTERM");
-				setTimeout(() => {
-					if (!proc.killed) proc.kill("SIGKILL");
-				}, 3000);
-			};
-			if (signal.aborted) kill();
-			else signal.addEventListener("abort", kill, { once: true });
+			if (signal.aborted) abortHandler();
+			else signal.addEventListener("abort", abortHandler, { once: true });
 		}
 	});
 
@@ -772,12 +787,10 @@ export default function (pi: ExtensionAPI) {
 					: undefined,
 			);
 
-			const isError = result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
-
 			return {
 				content: [{ type: "text", text: result.output || result.errorMessage || "(no output)" }],
 				details: { mode: "single", results: [result], availableModels } as SubagentDetails,
-				isError,
+				isError: isResultError(result),
 			};
 		},
 
@@ -837,7 +850,7 @@ export default function (pi: ExtensionAPI) {
 			};
 
 			const renderSingleResult = (r: SubagentResult, showHeader: boolean, showExpanded: boolean) => {
-				const isError = r.exitCode !== 0 || r.stopReason === "error" || r.stopReason === "aborted";
+				const isError = r.exitCode !== -1 && isResultError(r);
 				const icon = r.exitCode === -1
 					? theme.fg("warning", "⏳")
 					: isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
@@ -894,7 +907,7 @@ export default function (pi: ExtensionAPI) {
 			// Single mode
 			if (details.mode === "single") {
 				const r = details.results[0];
-				const isError = r.exitCode !== 0 || r.stopReason === "error" || r.stopReason === "aborted";
+				const isError = isResultError(r);
 				const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
 
 				if (expanded) {
