@@ -16,7 +16,7 @@
  *   {"compaction": {"reserveTokens": 60000}}
  */
 
-import { complete, getModel } from "@mariozechner/pi-ai";
+import { complete } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { convertToLlm } from "@mariozechner/pi-coding-agent";
 
@@ -55,17 +55,8 @@ export default function (pi: ExtensionAPI) {
 		const { preparation, signal } = event;
 		const { messagesToSummarize, turnPrefixMessages, tokensBefore, firstKeptEntryId, previousSummary } = preparation;
 
-		const model = ctx.model ?? getModel("anthropic", "claude-sonnet-4-20250514");
-		if (!model) {
-			ctx.ui.notify("No model available for compaction", "warning");
-			return;
-		}
-
-		const apiKey = await ctx.modelRegistry.getApiKey(model);
-		if (!apiKey) {
-			ctx.ui.notify(`No API key for ${model.provider}, using default compaction`, "warning");
-			return;
-		}
+		const model = ctx.model!;
+		const apiKey = (await ctx.modelRegistry.getApiKey(model))!;
 
 		// Combine all messages and convert to LLM format
 		const allMessages = [...messagesToSummarize, ...turnPrefixMessages];
