@@ -179,4 +179,11 @@ Default compaction triggers at ~92% context. To trigger earlier (~70%):
 
 ### Requirements
 
-Requires the taskman skill at `~/.pi/agent/skills/taskman/handoff.md`.
+Requires `taskmanager-exe` installed:
+
+```bash
+pipx install taskmanager-exe
+taskman install-skills
+```
+
+This provides the handoff skill at `~/.pi/agent/skills/taskman/handoff.md`.
