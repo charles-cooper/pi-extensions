@@ -2,8 +2,9 @@
  * Taskman Compaction Extension
  *
  * Replaces the default compaction prompt with the taskman /handoff skill.
- * This ensures compaction summaries follow the same format as manual handoffs,
- * with breadcrumbs and progressive disclosure.
+ * Instead of serializing the conversation to text, sends the actual messages
+ * plus a user message asking for a handoff summary - so the LLM sees the
+ * conversation in native format with full context.
  *
  * Usage:
  *   pi --extension extensions/taskman-compaction.ts
@@ -15,73 +16,45 @@
  *   {"compaction": {"reserveTokens": 60000}}
  */
 
-import * as fs from "node:fs";
-import * as path from "node:path";
-import * as os from "node:os";
 import { complete, getModel } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { convertToLlm, serializeConversation } from "@mariozechner/pi-coding-agent";
+import { convertToLlm } from "@mariozechner/pi-coding-agent";
 
-// Skill file location
-const HANDOFF_SKILL_PATH = path.join(os.homedir(), ".pi/agent/skills/taskman/handoff.md");
+const HANDOFF_REQUEST = `Context is getting long. Write a /handoff summary now to checkpoint our progress.
 
-// System prompt for compaction
-const SYSTEM_PROMPT = `You are a context summarization assistant creating a handoff document. Your task is to read a conversation between a user and an AI coding assistant, then produce a structured handoff following the skill instructions.
+Use the /handoff skill format:
+- Current focus and state
+- Breadcrumbs (file:line, commands, topic refs) instead of copying content
+- Next steps and blockers
 
-Do NOT continue the conversation. Do NOT respond to any questions in the conversation. ONLY output the handoff document.`;
+This summary will replace the conversation history, so include everything needed to continue.
 
-function readSkillFile(): string | undefined {
-	try {
-		if (fs.existsSync(HANDOFF_SKILL_PATH)) {
-			return fs.readFileSync(HANDOFF_SKILL_PATH, "utf-8");
-		}
-	} catch {
-		// ignore
-	}
-	return undefined;
-}
-
-function readTaskmanContext(cwd: string): string {
-	const parts: string[] = [];
-
-	// Try to read STATUS.md for current focus
-	const statusPath = path.join(cwd, ".agent-files/STATUS.md");
-	try {
-		if (fs.existsSync(statusPath)) {
-			const status = fs.readFileSync(statusPath, "utf-8");
-			parts.push(`<current-status>\n${status}\n</current-status>`);
-		}
-	} catch {
-		// ignore
-	}
-
-	// Try to read MEDIUMTERM_MEM.md for context
-	const memPath = path.join(cwd, ".agent-files/MEDIUMTERM_MEM.md");
-	try {
-		if (fs.existsSync(memPath)) {
-			const mem = fs.readFileSync(memPath, "utf-8");
-			parts.push(`<memory-index>\n${mem}\n</memory-index>`);
-		}
-	} catch {
-		// ignore
-	}
-
-	return parts.join("\n\n");
-}
+Output the handoff summary directly.`;
 
 export default function (pi: ExtensionAPI) {
+	// After compaction, inject a continue prompt so the agent re-orients
+	pi.on("session_compact", async (event, ctx) => {
+		// Only inject if this was our compaction (fromExtension means an extension handled it)
+		if (!event.fromExtension) return;
+
+		// Send a message to help agent re-orient after compaction
+		pi.sendMessage(
+			{
+				customType: "compaction_continue",
+				content: `Context was compacted. Use the /continue skill approach:
+1. Read the compaction summary above
+2. Expand breadcrumbs selectively (only what's needed for next step)
+3. Continue where you left off`,
+				display: false, // Don't render in UI, just send to LLM
+			},
+			{ triggerTurn: false }, // Don't auto-trigger a turn, wait for user
+		);
+	});
+
 	pi.on("session_before_compact", async (event, ctx) => {
 		const { preparation, signal } = event;
 		const { messagesToSummarize, turnPrefixMessages, tokensBefore, firstKeptEntryId, previousSummary } = preparation;
 
-		// Read the handoff skill
-		const skillContent = readSkillFile();
-		if (!skillContent) {
-			ctx.ui.notify("Handoff skill not found, using default compaction", "warning");
-			return;
-		}
-
-		// Use the same model as the conversation (or fall back to a fast model)
 		const model = ctx.model ?? getModel("anthropic", "claude-sonnet-4-20250514");
 		if (!model) {
 			ctx.ui.notify("No model available for compaction", "warning");
@@ -94,61 +67,39 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		// Combine all messages
+		// Combine all messages and convert to LLM format
 		const allMessages = [...messagesToSummarize, ...turnPrefixMessages];
+		const llmMessages = convertToLlm(allMessages);
 
 		ctx.ui.notify(
-			`Taskman compaction: summarizing ${allMessages.length} messages with handoff format...`,
+			`Taskman compaction: ${allMessages.length} messages, asking for /handoff summary...`,
 			"info",
 		);
 
-		// Serialize conversation
-		const conversationText = serializeConversation(convertToLlm(allMessages));
-
-		// Get taskman context
-		const taskmanContext = readTaskmanContext(ctx.cwd);
-
-		// Build prompt using the skill
+		// Add handoff request as final user message
 		const previousContext = previousSummary
-			? `\n\n<previous-summary>\n${previousSummary}\n</previous-summary>`
+			? `\n\nPrevious checkpoint for reference:\n${previousSummary}`
 			: "";
 
-		const promptText = `You are creating a compaction summary (automatic context checkpoint) for a coding session.
-
-Use the handoff skill format below to create the summary. The goal is to preserve context efficiently using breadcrumbs (pointers to recoverable information) rather than copying content verbatim.
-
-<handoff-skill>
-${skillContent}
-</handoff-skill>
-
-${taskmanContext ? `\n${taskmanContext}\n` : ""}
-${previousContext}
-
-<conversation>
-${conversationText}
-</conversation>
-
-Create a handoff-style summary. Key points:
-- Use breadcrumbs (file:line, commands to run) instead of copying content
-- Focus on WHAT was being done and WHY, not full details
-- Preserve exact file paths, function names, error messages as references
-- Include next steps and any blockers
-- Keep it concise - this replaces the conversation history
-
-Output the summary directly, no preamble.`;
-
-		const summaryMessages = [
+		const messagesWithRequest = [
+			...llmMessages,
 			{
 				role: "user" as const,
-				content: [{ type: "text" as const, text: promptText }],
+				content: [{ type: "text" as const, text: HANDOFF_REQUEST + previousContext }],
 				timestamp: Date.now(),
 			},
 		];
 
+		// Debug: show what we're sending
+		console.log("\n=== TASKMAN COMPACTION ===");
+		console.log(`Messages: ${llmMessages.length} + handoff request`);
+		console.log("Request:", HANDOFF_REQUEST + previousContext);
+		console.log("=== END ===\n");
+
 		try {
 			const response = await complete(
 				model,
-				{ systemPrompt: SYSTEM_PROMPT, messages: summaryMessages },
+				{ messages: messagesWithRequest },
 				{ apiKey, maxTokens: 8192, signal },
 			);
 
