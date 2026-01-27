@@ -140,16 +140,20 @@ export default function (pi: ExtensionAPI) {
 					if (!tool) {
 						return {
 							role: "toolResult" as const,
-							toolCallId: tc.toolCallId,
+							toolCallId: tc.id,
+							toolName: tc.name,
 							content: [{ type: "text" as const, text: `Error: Unknown tool ${tc.name}` }],
+							isError: true,
 							timestamp: Date.now(),
 						};
 					}
-					const result = await tool.execute(tc.toolCallId, tc.arguments, signal);
+					const result = await tool.execute(tc.id, tc.arguments, signal);
 					return {
 						role: "toolResult" as const,
-						toolCallId: tc.toolCallId,
+						toolCallId: tc.id,
+						toolName: tc.name,
 						content: result.content,
+						isError: false,
 						timestamp: Date.now(),
 					};
 				}));
