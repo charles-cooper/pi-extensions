@@ -183,7 +183,8 @@ function renderToolCallExpanded(
 	name: string,
 	args: Record<string, unknown>,
 	result: { content: Array<{ type: string; text?: string }>; isError: boolean } | undefined,
-	theme: { fg: (color: string, text: string) => string; bold: (text: string) => string }
+	theme: { fg: (color: string, text: string) => string; bold: (text: string) => string },
+	fullyExpanded: boolean = false
 ): Container {
 	const container = new Container();
 	const lowerName = name.toLowerCase();
@@ -211,13 +212,13 @@ function renderToolCallExpanded(
 				const totalLines = allLines.length;
 				// Filter to non-empty lines for display, but count from total
 				const nonEmptyLines = allLines.filter(l => l.trim() !== "");
-				const maxLines = 10;
+				const maxLines = fullyExpanded ? nonEmptyLines.length : 10;
 				const displayLines = nonEmptyLines.slice(0, maxLines);
 				const remaining = totalLines - maxLines;
 				if (displayLines.length > 0) {
 					container.addChild(new Text(theme.fg("dim", displayLines.join("\n")), 0, 0));
 				}
-				if (remaining > 0) {
+				if (remaining > 0 && !fullyExpanded) {
 					container.addChild(new Text(theme.fg("muted", `... (${remaining} more lines, ${totalLines} total)`), 0, 0));
 				}
 			}
@@ -241,7 +242,7 @@ function renderToolCallExpanded(
 				const lang = getLanguageFromPath(rawPath);
 				const allLines = content.split("\n");
 				const totalLines = allLines.length;
-				const maxLines = 15;
+				const maxLines = fullyExpanded ? allLines.length : 15;
 				const displayLines = allLines.slice(0, maxLines);
 				const remaining = totalLines - maxLines;
 				const displayText = displayLines.join("\n");
@@ -257,7 +258,7 @@ function renderToolCallExpanded(
 						container.addChild(new Text(theme.fg("toolOutput", displayText), 0, 0));
 					}
 				}
-				if (remaining > 0) {
+				if (remaining > 0 && !fullyExpanded) {
 					container.addChild(new Text(theme.fg("muted", `... (${remaining} more lines, ${totalLines} total)`), 0, 0));
 				}
 			}
@@ -271,7 +272,7 @@ function renderToolCallExpanded(
 			if (content) {
 				const allLines = content.split("\n");
 				const totalLines = allLines.length;
-				const maxLines = 15;
+				const maxLines = fullyExpanded ? allLines.length : 15;
 				const displayLines = allLines.slice(0, maxLines);
 				const remaining = totalLines - maxLines;
 				const displayText = displayLines.join("\n");
@@ -290,7 +291,7 @@ function renderToolCallExpanded(
 						container.addChild(new Text(theme.fg("toolOutput", displayText), 0, 0));
 					}
 				}
-				if (remaining > 0) {
+				if (remaining > 0 && !fullyExpanded) {
 					container.addChild(new Text(theme.fg("muted", `... (${remaining} more lines, ${totalLines} total)`), 0, 0));
 				}
 			}
@@ -309,8 +310,10 @@ function renderToolCallExpanded(
 				const allNewLines = newText.split("\n");
 				const oldTotalLines = allOldLines.length;
 				const newTotalLines = allNewLines.length;
-				const oldDisplayLines = allOldLines.slice(0, 10);
-				const newDisplayLines = allNewLines.slice(0, 10);
+				const oldMaxLines = fullyExpanded ? oldTotalLines : 10;
+				const newMaxLines = fullyExpanded ? newTotalLines : 10;
+				const oldDisplayLines = allOldLines.slice(0, oldMaxLines);
+				const newDisplayLines = allNewLines.slice(0, newMaxLines);
 				const oldRemaining = oldTotalLines - oldDisplayLines.length;
 				const newRemaining = newTotalLines - newDisplayLines.length;
 				
@@ -319,7 +322,7 @@ function renderToolCallExpanded(
 					if (oldFormatted.trim()) {
 						container.addChild(new Text(oldFormatted, 0, 0));
 					}
-					if (oldRemaining > 0) {
+					if (oldRemaining > 0 && !fullyExpanded) {
 						container.addChild(new Text(theme.fg("muted", `  ... (${oldRemaining} more lines, ${oldTotalLines} total)`), 0, 0));
 					}
 				}
@@ -328,7 +331,7 @@ function renderToolCallExpanded(
 					if (newFormatted.trim()) {
 						container.addChild(new Text(newFormatted, 0, 0));
 					}
-					if (newRemaining > 0) {
+					if (newRemaining > 0 && !fullyExpanded) {
 						container.addChild(new Text(theme.fg("muted", `  ... (${newRemaining} more lines, ${newTotalLines} total)`), 0, 0));
 					}
 				}
@@ -341,13 +344,14 @@ function renderToolCallExpanded(
 			const argsStr = JSON.stringify(args, null, 2);
 			const allLines = argsStr.split("\n");
 			const totalLines = allLines.length;
-			const displayLines = allLines.slice(0, 20);
+			const maxLines = fullyExpanded ? totalLines : 20;
+			const displayLines = allLines.slice(0, maxLines);
 			const remaining = totalLines - displayLines.length;
 			const displayText = displayLines.join("\n");
 			if (displayText.trim()) {
 				container.addChild(new Text(theme.fg("dim", displayText), 0, 0));
 			}
-			if (remaining > 0) {
+			if (remaining > 0 && !fullyExpanded) {
 				container.addChild(new Text(theme.fg("muted", `... (${remaining} more lines, ${totalLines} total)`), 0, 0));
 			}
 			break;
@@ -1010,7 +1014,7 @@ export default function (pi: ExtensionAPI) {
 					if (item.type === "toolCall") {
 						if (showExpanded) {
 							container.addChild(new Spacer(1));
-							container.addChild(renderToolCallExpanded(item.name, item.args, item.result, theme));
+							container.addChild(renderToolCallExpanded(item.name, item.args, item.result, theme, true));
 						} else {
 							container.addChild(new Text(
 								theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, theme.fg.bind(theme)),
@@ -1073,7 +1077,7 @@ export default function (pi: ExtensionAPI) {
 						for (const item of toolCalls) {
 							if (item.type === "toolCall") {
 								container.addChild(new Spacer(1));
-								container.addChild(renderToolCallExpanded(item.name, item.args, item.result, theme));
+								container.addChild(renderToolCallExpanded(item.name, item.args, item.result, theme, true));
 							}
 						}
 					}
