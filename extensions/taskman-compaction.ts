@@ -40,9 +40,14 @@ function checkTaskmanAvailable(): boolean {
 }
 
 export default function (pi: ExtensionAPI) {
+	// Track if we've already sent the continue message for this compaction
+	let continueMessageSent = false;
+
 	// After compaction, inject continue guidance
 	pi.on("session_compact", async (event, ctx) => {
 		if (!event.fromExtension) return;
+		if (continueMessageSent) return; // Prevent duplicate
+		continueMessageSent = true;
 
 		pi.sendMessage(
 			{
@@ -58,6 +63,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_before_compact", async (event, ctx) => {
+		continueMessageSent = false; // Reset for next compaction
 		const { preparation, signal } = event;
 		const { messagesToSummarize, turnPrefixMessages, tokensBefore, firstKeptEntryId, previousSummary } = preparation;
 
@@ -76,6 +82,12 @@ export default function (pi: ExtensionAPI) {
 		// Combine messages and convert to LLM format
 		const allMessages = [...messagesToSummarize, ...turnPrefixMessages];
 		const llmMessages = convertToLlm(allMessages);
+
+		// If there are no messages to summarize, fall back to default compaction
+		if (llmMessages.length === 0) {
+			ctx.ui.notify("No messages to summarize, using default compaction", "info");
+			return;
+		}
 
 		ctx.ui.notify(`Taskman compaction: ${allMessages.length} messages...`, "info");
 
@@ -97,6 +109,15 @@ export default function (pi: ExtensionAPI) {
 			? `\n\nPrevious checkpoint for reference:\n${previousSummary}`
 			: "";
 
+		// System prompt for the compaction agent
+		const systemPrompt = `You are a context summarizer. Your job is to create concise summaries of conversations that preserve all important context for continuation.
+
+When summarizing:
+- Include key decisions, learnings, and current state
+- Use breadcrumbs (file:line references) for code context
+- Preserve critical details needed to continue work
+- Keep the summary focused and actionable`;
+
 		let messages: Message[] = [
 			...llmMessages,
 			{
@@ -116,7 +137,7 @@ export default function (pi: ExtensionAPI) {
 
 				const response = await complete(
 					model,
-					{ messages, tools: toolDefs },
+					{ systemPrompt, messages, tools: toolDefs },
 					{ apiKey, maxTokens: 8192, signal },
 				);
 
@@ -159,9 +180,13 @@ export default function (pi: ExtensionAPI) {
 				}));
 
 				// Add assistant response and tool results to messages
+				// Filter out thinking blocks to avoid API issues on subsequent turns
+				const assistantContent = response.content.filter(
+					(c) => c.type === "text" || c.type === "toolCall"
+				);
 				messages = [
 					...messages,
-					{ role: "assistant" as const, content: response.content, timestamp: Date.now() } as Message,
+					{ role: "assistant" as const, content: assistantContent, timestamp: Date.now() } as Message,
 					...toolResults,
 				];
 			}
@@ -181,7 +206,15 @@ export default function (pi: ExtensionAPI) {
 		} catch (error) {
 			if (signal.aborted) return;
 			const message = error instanceof Error ? error.message : String(error);
-			ctx.ui.notify(`Taskman compaction failed: ${message}, using default`, "error");
+			// Include model info in error for debugging 422 errors
+			const modelInfo = `${model.provider}/${model.id}`;
+			ctx.ui.notify(`Taskman compaction failed (${modelInfo}): ${message}`, "error");
+			console.error("[taskman-compaction] Error details:", {
+				model: modelInfo,
+				error: message,
+				messagesCount: messages.length,
+				lastMessageRole: messages[messages.length - 1]?.role,
+			});
 			return;
 		}
 	});
