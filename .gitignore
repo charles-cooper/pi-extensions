@@ -4,3 +4,4 @@ node_modules/
 .agent-files.git/
 package.json
 package-lock.json
+scratch/
