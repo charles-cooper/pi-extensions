@@ -183,7 +183,8 @@ function renderToolCallExpanded(
 	name: string,
 	args: Record<string, unknown>,
 	result: { content: Array<{ type: string; text?: string }>; isError: boolean } | undefined,
-	theme: { fg: (color: string, text: string) => string; bold: (text: string) => string }
+	theme: { fg: (color: string, text: string) => string; bold: (text: string) => string },
+	fullyExpanded: boolean = false
 ): Container {
 	const container = new Container();
 	const lowerName = name.toLowerCase();
@@ -207,13 +208,18 @@ function renderToolCallExpanded(
 			// Show bash output
 			const output = getResultText();
 			if (output) {
-				const lines = output.split("\n");
-				const maxLines = 10;
-				const displayLines = lines.slice(0, maxLines);
-				const remaining = lines.length - maxLines;
-				container.addChild(new Text(theme.fg("dim", displayLines.join("\n")), 0, 0));
-				if (remaining > 0) {
-					container.addChild(new Text(theme.fg("muted", `... (${remaining} more lines)`), 0, 0));
+				const allLines = output.split("\n");
+				const totalLines = allLines.length;
+				// Filter to non-empty lines for display, but count from total
+				const nonEmptyLines = allLines.filter(l => l.trim() !== "");
+				const maxLines = fullyExpanded ? nonEmptyLines.length : 10;
+				const displayLines = nonEmptyLines.slice(0, maxLines);
+				const remaining = totalLines - maxLines;
+				if (displayLines.length > 0) {
+					container.addChild(new Text(theme.fg("dim", displayLines.join("\n")), 0, 0));
+				}
+				if (remaining > 0 && !fullyExpanded) {
+					container.addChild(new Text(theme.fg("muted", `... (${remaining} more lines, ${totalLines} total)`), 0, 0));
 				}
 			}
 			break;
@@ -234,22 +240,26 @@ function renderToolCallExpanded(
 			const content = getResultText();
 			if (content) {
 				const lang = getLanguageFromPath(rawPath);
-				const lines = content.split("\n");
-				const maxLines = 15;
-				const displayLines = lines.slice(0, maxLines);
-				const remaining = lines.length - maxLines;
-				try {
-					if (lang) {
-						const highlighted = highlightCode(displayLines.join("\n"), lang);
-						container.addChild(new Text(highlighted.join("\n"), 0, 0));
-					} else {
-						container.addChild(new Text(theme.fg("toolOutput", displayLines.join("\n")), 0, 0));
+				const allLines = content.split("\n");
+				const totalLines = allLines.length;
+				const maxLines = fullyExpanded ? allLines.length : 15;
+				const displayLines = allLines.slice(0, maxLines);
+				const remaining = totalLines - maxLines;
+				const displayText = displayLines.join("\n");
+				if (displayText.trim()) {
+					try {
+						if (lang) {
+							const highlighted = highlightCode(displayText, lang);
+							container.addChild(new Text(highlighted.join("\n"), 0, 0));
+						} else {
+							container.addChild(new Text(theme.fg("toolOutput", displayText), 0, 0));
+						}
+					} catch {
+						container.addChild(new Text(theme.fg("toolOutput", displayText), 0, 0));
 					}
-				} catch {
-					container.addChild(new Text(theme.fg("toolOutput", displayLines.join("\n")), 0, 0));
 				}
-				if (remaining > 0) {
-					container.addChild(new Text(theme.fg("muted", `... (${remaining} more lines)`), 0, 0));
+				if (remaining > 0 && !fullyExpanded) {
+					container.addChild(new Text(theme.fg("muted", `... (${remaining} more lines, ${totalLines} total)`), 0, 0));
 				}
 			}
 			break;
@@ -260,25 +270,29 @@ function renderToolCallExpanded(
 			const content = (args.content as string) || "";
 			container.addChild(new Text(theme.fg("muted", "write ") + theme.fg("accent", filePath), 0, 0));
 			if (content) {
-				const lines = content.split("\n");
-				const maxLines = 15;
-				const displayLines = lines.slice(0, maxLines);
-				const remaining = lines.length - maxLines;
+				const allLines = content.split("\n");
+				const totalLines = allLines.length;
+				const maxLines = fullyExpanded ? allLines.length : 15;
+				const displayLines = allLines.slice(0, maxLines);
+				const remaining = totalLines - maxLines;
+				const displayText = displayLines.join("\n");
 				
 				// Try syntax highlighting, fall back to plain
-				const lang = getLanguageFromPath(rawPath);
-				try {
-					if (lang) {
-						const highlighted = highlightCode(displayLines.join("\n"), lang);
-						container.addChild(new Text(highlighted.join("\n"), 0, 0));
-					} else {
-						container.addChild(new Text(theme.fg("toolOutput", displayLines.join("\n")), 0, 0));
+				if (displayText.trim()) {
+					const lang = getLanguageFromPath(rawPath);
+					try {
+						if (lang) {
+							const highlighted = highlightCode(displayText, lang);
+							container.addChild(new Text(highlighted.join("\n"), 0, 0));
+						} else {
+							container.addChild(new Text(theme.fg("toolOutput", displayText), 0, 0));
+						}
+					} catch {
+						container.addChild(new Text(theme.fg("toolOutput", displayText), 0, 0));
 					}
-				} catch {
-					container.addChild(new Text(theme.fg("toolOutput", displayLines.join("\n")), 0, 0));
 				}
-				if (remaining > 0) {
-					container.addChild(new Text(theme.fg("muted", `... (${remaining} more lines)`), 0, 0));
+				if (remaining > 0 && !fullyExpanded) {
+					container.addChild(new Text(theme.fg("muted", `... (${remaining} more lines, ${totalLines} total)`), 0, 0));
 				}
 			}
 			break;
@@ -294,21 +308,31 @@ function renderToolCallExpanded(
 			if (oldText || newText) {
 				const allOldLines = oldText.split("\n");
 				const allNewLines = newText.split("\n");
-				const oldLines = allOldLines.slice(0, 10);
-				const newLines = allNewLines.slice(0, 10);
-				const oldRemaining = allOldLines.length - oldLines.length;
-				const newRemaining = allNewLines.length - newLines.length;
+				const oldTotalLines = allOldLines.length;
+				const newTotalLines = allNewLines.length;
+				const oldMaxLines = fullyExpanded ? oldTotalLines : 10;
+				const newMaxLines = fullyExpanded ? newTotalLines : 10;
+				const oldDisplayLines = allOldLines.slice(0, oldMaxLines);
+				const newDisplayLines = allNewLines.slice(0, newMaxLines);
+				const oldRemaining = oldTotalLines - oldDisplayLines.length;
+				const newRemaining = newTotalLines - newDisplayLines.length;
 				
 				if (oldText) {
-					container.addChild(new Text(oldLines.map(l => theme.fg("error", "- " + l)).join("\n"), 0, 0));
-					if (oldRemaining > 0) {
-						container.addChild(new Text(theme.fg("muted", `  ... (${oldRemaining} more lines)`), 0, 0));
+					const oldFormatted = oldDisplayLines.map(l => theme.fg("error", "- " + l)).join("\n");
+					if (oldFormatted.trim()) {
+						container.addChild(new Text(oldFormatted, 0, 0));
+					}
+					if (oldRemaining > 0 && !fullyExpanded) {
+						container.addChild(new Text(theme.fg("muted", `  ... (${oldRemaining} more lines, ${oldTotalLines} total)`), 0, 0));
 					}
 				}
 				if (newText) {
-					container.addChild(new Text(newLines.map(l => theme.fg("success", "+ " + l)).join("\n"), 0, 0));
-					if (newRemaining > 0) {
-						container.addChild(new Text(theme.fg("muted", `  ... (${newRemaining} more lines)`), 0, 0));
+					const newFormatted = newDisplayLines.map(l => theme.fg("success", "+ " + l)).join("\n");
+					if (newFormatted.trim()) {
+						container.addChild(new Text(newFormatted, 0, 0));
+					}
+					if (newRemaining > 0 && !fullyExpanded) {
+						container.addChild(new Text(theme.fg("muted", `  ... (${newRemaining} more lines, ${newTotalLines} total)`), 0, 0));
 					}
 				}
 			}
@@ -318,11 +342,17 @@ function renderToolCallExpanded(
 			// For unknown tools, show name and formatted JSON args
 			container.addChild(new Text(theme.fg("accent", theme.bold(name)), 0, 0));
 			const argsStr = JSON.stringify(args, null, 2);
-			const lines = argsStr.split("\n").slice(0, 20);
-			const remaining = argsStr.split("\n").length - lines.length;
-			container.addChild(new Text(theme.fg("dim", lines.join("\n")), 0, 0));
-			if (remaining > 0) {
-				container.addChild(new Text(theme.fg("muted", `... (${remaining} more lines)`), 0, 0));
+			const allLines = argsStr.split("\n");
+			const totalLines = allLines.length;
+			const maxLines = fullyExpanded ? totalLines : 20;
+			const displayLines = allLines.slice(0, maxLines);
+			const remaining = totalLines - displayLines.length;
+			const displayText = displayLines.join("\n");
+			if (displayText.trim()) {
+				container.addChild(new Text(theme.fg("dim", displayText), 0, 0));
+			}
+			if (remaining > 0 && !fullyExpanded) {
+				container.addChild(new Text(theme.fg("muted", `... (${remaining} more lines, ${totalLines} total)`), 0, 0));
 			}
 			break;
 		}
@@ -760,7 +790,7 @@ export default function (pi: ExtensionAPI) {
 			tasks: Type.Optional(Type.Array(TaskItem, { description: "Array of tasks for parallel execution (max 8)" })),
 		}),
 
-		async execute(_id, params, onUpdate, ctx, signal) {
+		async execute(_id, params, signal, onUpdate, ctx) {
 			const models = getAvailableModels(ctx);
 			const availableModels = [...models.keys()];
 
@@ -984,7 +1014,7 @@ export default function (pi: ExtensionAPI) {
 					if (item.type === "toolCall") {
 						if (showExpanded) {
 							container.addChild(new Spacer(1));
-							container.addChild(renderToolCallExpanded(item.name, item.args, item.result, theme));
+							container.addChild(renderToolCallExpanded(item.name, item.args, item.result, theme, true));
 						} else {
 							container.addChild(new Text(
 								theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, theme.fg.bind(theme)),
@@ -1047,7 +1077,7 @@ export default function (pi: ExtensionAPI) {
 						for (const item of toolCalls) {
 							if (item.type === "toolCall") {
 								container.addChild(new Spacer(1));
-								container.addChild(renderToolCallExpanded(item.name, item.args, item.result, theme));
+								container.addChild(renderToolCallExpanded(item.name, item.args, item.result, theme, true));
 							}
 						}
 					}
@@ -1074,10 +1104,18 @@ export default function (pi: ExtensionAPI) {
 				if (isError && r.errorMessage) {
 					text += ` ${theme.fg("error", r.errorMessage)}`;
 				} else if (r.output) {
-					const preview = r.output.split("\n").slice(0, 5).join("\n");
-					const truncated = r.output.split("\n").length > 5;
-					text += "\n" + theme.fg("toolOutput", preview);
-					if (truncated) text += "\n" + theme.fg("muted", "... (Ctrl+O to expand)");
+					const allLines = r.output.split("\n");
+					const totalLines = allLines.length;
+					// Filter to non-empty lines for meaningful preview
+					const nonEmptyLines = allLines.filter(l => l.trim() !== "");
+					const previewLines = nonEmptyLines.slice(0, 5);
+					const remaining = totalLines - 5;
+					if (previewLines.length > 0) {
+						text += "\n" + theme.fg("toolOutput", previewLines.join("\n"));
+					}
+					if (remaining > 0) {
+						text += "\n" + theme.fg("muted", `... (${remaining} more lines, Ctrl+O to expand)`);
+					}
 				} else {
 					text += " " + theme.fg("muted", "(no output)");
 				}

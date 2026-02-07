@@ -790,7 +790,7 @@ export default function (pi: ExtensionAPI) {
 			tasks: Type.Optional(Type.Array(TaskItem, { description: "Array of tasks for parallel execution (max 8)" })),
 		}),
 
-		async execute(_id, params, onUpdate, ctx, signal) {
+		async execute(_id, params, signal, onUpdate, ctx) {
 			const models = getAvailableModels(ctx);
 			const availableModels = [...models.keys()];
 
