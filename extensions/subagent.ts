@@ -1,9 +1,11 @@
 /**
- * Subagent Tool
+ * Subagent Tools
  *
- * Spawn subagents with isolated context. Supports:
- * - Single mode: model + task
- * - Parallel mode: tasks array for concurrent execution
+ * Two tools for spawning subagents with isolated context:
+ * - subagent: single task (model + task, both required)
+ * - subagents: parallel tasks (tasks array, required)
+ *
+ * Split into separate tools so models see unambiguous schemas.
  */
 
 import { spawn } from "node:child_process";
@@ -768,144 +770,277 @@ export default function (pi: ExtensionAPI) {
 	
 	const modelListShort = enabledModels.join(", ") || "(all models with API keys)";
 
-	const TaskItem = Type.Object({
-		model: Type.String({ description: "Model ID" }),
-		task: Type.String({ description: "Task instruction" }),
-		context: Type.Optional(Type.String({ description: "Optional XML context" })),
-		tools: Type.Optional(Type.Array(Type.String(), { description: "Tool names to enable" })),
-	});
+	// Shared model resolution with fuzzy matching. Throws on failure
+	// so the agent loop properly marks the result as isError.
+	const resolveModel = (model: string, models: Map<string, { provider: string; id: string }>): string => {
+		// Exact match first
+		const exact = models.get(model.toLowerCase());
+		if (exact) return `${exact.provider}/${exact.id}`;
 
+		// Fuzzy: substring match on full spec
+		const lower = model.toLowerCase();
+		const matches = [...models.entries()].filter(([key]) => key.includes(lower));
+		if (matches.length === 1) return `${matches[0][1].provider}/${matches[0][1].id}`;
+		if (matches.length > 1) {
+			throw new Error(`Ambiguous model "${model}". Matches: ${matches.map(m => m[0]).join(", ")}`);
+		}
+		throw new Error(`Unknown model "${model}". Available: ${[...models.keys()].join(", ")}`);
+	};
+
+	// Shared renderResult for both tools (already dispatches on details.mode)
+	const sharedRenderResult = (result: any, { expanded }: { expanded: boolean }, theme: any) => {
+		const details = result.details as SubagentDetails | undefined;
+		if (!details || details.results.length === 0) {
+			const text = result.content[0];
+			return new Text(text?.type === "text" ? text.text : "(no output)", 0, 0);
+		}
+
+		const mdTheme = getMarkdownTheme();
+
+		const aggregateUsage = (results: SubagentResult[]): UsageStats => {
+			const total = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
+			for (const r of results) {
+				total.input += r.usage.input;
+				total.output += r.usage.output;
+				total.cacheRead += r.usage.cacheRead;
+				total.cacheWrite += r.usage.cacheWrite;
+				total.cost += r.usage.cost;
+				total.turns += r.usage.turns;
+			}
+			return total;
+		};
+
+		const renderSingleResult = (r: SubagentResult, showHeader: boolean, showExpanded: boolean) => {
+			const isError = r.exitCode !== -1 && isResultError(r);
+			const icon = r.exitCode === -1
+				? theme.fg("warning", "⏳")
+				: isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
+			const displayItems = getDisplayItems(getDisplayMessages(r));
+			const finalOutput = getFinalOutput(r.messages);
+			const toolCalls = displayItems.filter((i: DisplayItem) => i.type === "toolCall");
+
+			const container = new Container();
+
+			if (showHeader) {
+				let header = `${icon} ${theme.fg("accent", r.model)}`;
+				if (isError && r.stopReason) header += ` ${theme.fg("error", `[${r.stopReason}]`)}`;
+				container.addChild(new Text(header, 0, 0));
+			}
+
+			if (r.errorMessage) {
+				container.addChild(new Text(theme.fg("error", r.errorMessage), 0, 0));
+			}
+
+			// Task
+			container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
+
+			// Tool calls
+			for (const item of toolCalls) {
+				if (item.type === "toolCall") {
+					if (showExpanded) {
+						container.addChild(new Spacer(1));
+						container.addChild(renderToolCallExpanded(item.name, item.args, item.result, theme, true));
+					} else {
+						container.addChild(new Text(
+							theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, theme.fg.bind(theme)),
+							0, 0
+						));
+					}
+				}
+			}
+
+			// Output
+			if (finalOutput) {
+				container.addChild(new Spacer(1));
+				container.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
+			} else if (r.exitCode === -1) {
+				container.addChild(new Text(theme.fg("muted", "(running...)"), 0, 0));
+			}
+
+			// Usage
+			if (r.exitCode !== -1) {
+				container.addChild(new Text(theme.fg("dim", formatUsage(r.usage, r.model)), 0, 0));
+			}
+
+			return container;
+		};
+
+		// Single mode
+		if (details.mode === "single") {
+			const r = details.results[0];
+			const isRunning = r.exitCode === -1;
+			const isError = !isRunning && isResultError(r);
+			const icon = isRunning
+				? theme.fg("warning", "⏳")
+				: isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
+
+			if (expanded) {
+				const container = new Container();
+				const displayItems = getDisplayItems(getDisplayMessages(r));
+				const toolCalls = displayItems.filter((i: DisplayItem) => i.type === "toolCall");
+
+				if (isError) {
+					let statusLine = icon;
+					if (r.stopReason) statusLine += ` ${theme.fg("error", `[${r.stopReason}]`)}`;
+					if (r.errorMessage) statusLine += ` ${theme.fg("error", r.errorMessage)}`;
+					container.addChild(new Text(statusLine, 0, 0));
+				}
+
+				if (r.context) {
+					container.addChild(new Spacer(1));
+					container.addChild(new Text(theme.fg("muted", "─── Context ───"), 0, 0));
+					container.addChild(new Text(theme.fg("dim", r.context), 0, 0));
+				}
+
+				if (toolCalls.length > 0) {
+					container.addChild(new Spacer(1));
+					container.addChild(new Text(theme.fg("muted", "─── Tool Calls ───"), 0, 0));
+					for (const item of toolCalls) {
+						if (item.type === "toolCall") {
+							container.addChild(new Spacer(1));
+							container.addChild(renderToolCallExpanded(item.name, item.args, item.result, theme, true));
+						}
+					}
+				}
+
+				container.addChild(new Spacer(1));
+				container.addChild(new Text(theme.fg("muted", "─── Output ───"), 0, 0));
+				const finalOut = getFinalOutput(r.messages);
+				if (finalOut) {
+					container.addChild(new Markdown(finalOut.trim(), 0, 0, mdTheme));
+				} else {
+					container.addChild(new Text(theme.fg("muted", "(no output)"), 0, 0));
+				}
+
+				container.addChild(new Spacer(1));
+				container.addChild(new Text(theme.fg("dim", formatUsage(r.usage, r.model)), 0, 0));
+
+				return container;
+			}
+
+			// Collapsed single
+			let text = `${icon} ${theme.fg("accent", r.model)}`;
+			if (isError && r.errorMessage) {
+				text += ` ${theme.fg("error", r.errorMessage)}`;
+			} else if (r.output) {
+				const allLines = r.output.split("\n");
+				const totalLines = allLines.length;
+				const nonEmptyLines = allLines.filter((l: string) => l.trim() !== "");
+				const previewLines = nonEmptyLines.slice(0, 5);
+				const remaining = totalLines - 5;
+				if (previewLines.length > 0) {
+					text += "\n" + theme.fg("toolOutput", previewLines.join("\n"));
+				}
+				if (remaining > 0) {
+					text += "\n" + theme.fg("muted", `... (${remaining} more lines, Ctrl+O to expand)`);
+				}
+			} else {
+				text += " " + theme.fg("muted", "(no output)");
+			}
+			text += "\n" + theme.fg("dim", formatUsage(r.usage, r.model));
+			return new Text(text, 0, 0);
+		}
+
+		// Parallel mode
+		const running = details.results.filter((r) => r.exitCode === -1).length;
+		const done = details.results.filter((r) => r.exitCode !== -1);
+		const successCount = done.filter((r) => !isResultError(r)).length;
+		const failCount = done.filter((r) => isResultError(r)).length;
+		const isRunning = running > 0;
+		const icon = isRunning
+			? theme.fg("warning", "⏳")
+			: failCount > 0
+				? theme.fg("warning", "◐")
+				: theme.fg("success", "✓");
+		const status = isRunning
+			? `${successCount + failCount}/${details.results.length} done, ${running} running`
+			: `${successCount}/${details.results.length} succeeded`;
+
+		if (expanded) {
+			const container = new Container();
+			container.addChild(new Text(
+				`${icon} ${theme.fg("toolTitle", theme.bold("subagents "))}${theme.fg("accent", `parallel ${status}`)}`,
+				0, 0
+			));
+
+			for (const r of details.results) {
+				container.addChild(new Spacer(1));
+				container.addChild(new Text(theme.fg("muted", "────────────────────"), 0, 0));
+				container.addChild(renderSingleResult(r, true, true));
+			}
+
+			if (!isRunning) {
+				const totalUsage = aggregateUsage(details.results);
+				container.addChild(new Spacer(1));
+				container.addChild(new Text(theme.fg("dim", `Total: ${formatUsage(totalUsage, "")}`), 0, 0));
+			}
+
+			return container;
+		}
+
+		// Collapsed parallel
+		let text = `${icon} ${theme.fg("toolTitle", theme.bold("parallel "))}${theme.fg("accent", status)}`;
+		for (const r of details.results) {
+			const rIcon = r.exitCode === -1
+				? theme.fg("warning", "⏳")
+				: isResultError(r) ? theme.fg("error", "✗") : theme.fg("success", "✓");
+			let preview: string;
+			if (r.output) {
+				preview = (r.output.length > 60 ? r.output.slice(0, 60) + "..." : r.output).split("\n")[0];
+			} else if (r.exitCode === -1) {
+				const toolCalls = getDisplayItems(getDisplayMessages(r)).filter((i: DisplayItem) => i.type === "toolCall");
+				if (toolCalls.length > 0) {
+					const last = toolCalls[toolCalls.length - 1];
+					const name = last.name.toLowerCase();
+					if (name === "bash") {
+						const cmd = (last.args.command as string) ?? "";
+						preview = `$ ${cmd.slice(0, 40)}${cmd.length > 40 ? "..." : ""}`;
+					} else if (name === "read" || name === "write" || name === "edit") {
+						const p = shortenPath((last.args.path || last.args.file_path || "") as string);
+						preview = `${name} ${p}`;
+					} else {
+						preview = `${name}...`;
+					}
+				} else {
+					preview = "(starting...)";
+				}
+			} else {
+				preview = "(no output)";
+			}
+			text += `\n${rIcon} ${theme.fg("accent", r.model)} ${theme.fg("dim", preview)}`;
+		}
+		if (!isRunning) {
+			const totalUsage = aggregateUsage(details.results);
+			text += `\n${theme.fg("dim", `Total: ${formatUsage(totalUsage, "")}`)}`;
+		}
+		if (!expanded) {
+			text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
+		}
+		return new Text(text, 0, 0);
+	};
+
+	// ── Single subagent tool ──
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
 		description:
 			`Spawn a subagent with isolated context. Params: model, task, context (optional), tools (optional array).\n\n${modelListXml}`,
 		parameters: Type.Object({
-			// Single mode
-			model: Type.Optional(Type.String({ description: `Model ID. Available: ${modelListShort}` })),
-			task: Type.Optional(Type.String({ description: "The task instruction for the subagent" })),
+			model: Type.String({ description: `Model ID. Available: ${modelListShort}` }),
+			task: Type.String({ description: "The task instruction for the subagent" }),
 			context: Type.Optional(Type.String({ description: "Optional XML-structured context to pass" })),
 			tools: Type.Optional(Type.Array(Type.String(), { description: "Tool names to enable (default: all)" })),
-			// Parallel mode
-			tasks: Type.Optional(Type.Array(TaskItem, { description: "Array of tasks for parallel execution (max 8)" })),
 		}),
 
 		async execute(_id, params, signal, onUpdate, ctx) {
 			const models = getAvailableModels(ctx);
-			const availableModels = [...models.keys()];
-
-			const resolveModel = (model: string) => {
-				const resolved = models.get(model.toLowerCase());
-				if (!resolved) return null;
-				return `${resolved.provider}/${resolved.id}`;
-			};
-
-			const hasSingle = params.model && params.task;
-			const hasParallel = params.tasks && params.tasks.length > 0;
-
-			if (hasSingle === hasParallel) {
-				return {
-					content: [{ type: "text", text: `Provide either (model + task) or tasks array, not both/neither.\nAvailable models: ${availableModels.join(", ")}` }],
-					isError: true,
-				};
-			}
-
-			// Parallel mode
-			if (hasParallel) {
-				if (params.tasks!.length > MAX_PARALLEL) {
-					return {
-						content: [{ type: "text", text: `Too many tasks (${params.tasks!.length}). Max is ${MAX_PARALLEL}.` }],
-						isError: true,
-					};
-				}
-
-				// Validate all models upfront
-				for (const t of params.tasks!) {
-					if (!resolveModel(t.model)) {
-						return {
-							content: [{ type: "text", text: `Unknown model "${t.model}". Available: ${availableModels.join(", ")}` }],
-							isError: true,
-						};
-					}
-				}
-
-				// Track results for streaming
-				const allResults: SubagentResult[] = params.tasks!.map((t) => ({
-					model: resolveModel(t.model)!,
-					task: t.task,
-					context: t.context,
-					exitCode: -1, // -1 = running
-					output: "",
-					messages: [],
-					usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 },
-				}));
-
-				const emitUpdate = () => {
-					if (onUpdate) {
-						const done = allResults.filter((r) => r.exitCode !== -1).length;
-						const running = allResults.length - done;
-						onUpdate({
-							content: [{ type: "text", text: `${done}/${allResults.length} done, ${running} running...` }],
-							details: { mode: "parallel", results: allResults, availableModels } as SubagentDetails,
-						});
-					}
-				};
-
-				emitUpdate();
-
-				await mapWithConcurrency(params.tasks!, MAX_CONCURRENCY, async (t, index) => {
-					const result = await runSubagent(
-						ctx.cwd,
-						resolveModel(t.model)!,
-						t.task,
-						t.context,
-						t.tools,
-						signal,
-						(r) => {
-							allResults[index] = r;
-							emitUpdate();
-						},
-					);
-					allResults[index] = result;
-					emitUpdate();
-					return result;
-				});
-
-				const successCount = allResults.filter((r) => !isResultError(r)).length;
-				const fullOutputs = allResults.map((r, i) => {
-					const status = isResultError(r) ? "✗" : "✓";
-					const header = `[${i + 1}/${allResults.length}] ${status} ${r.model}`;
-					const body = r.output || r.errorMessage || "(no output)";
-					return `${header}\n${body}`;
-				});
-
-				// Record usage for all subagents
-				for (const r of allResults) {
-					if (r.usage.cost > 0 || r.usage.input > 0) {
-						recordUsage(r.usage, r.model, ctx);
-					}
-				}
-
-				return {
-					content: [{ type: "text", text: `${successCount}/${allResults.length} succeeded\n\n${fullOutputs.join("\n\n---\n\n")}` }],
-					details: { mode: "parallel", results: allResults, availableModels } as SubagentDetails,
-					isError: successCount < allResults.length,
-				};
-			}
-
-			// Single mode
-			const modelSpec = resolveModel(params.model!);
-			if (!modelSpec) {
-				return {
-					content: [{ type: "text", text: `Unknown model "${params.model}". Available: ${availableModels.join(", ")}` }],
-					isError: true,
-				};
-			}
+			// Throws on bad model → agent loop sets isError properly
+			const modelSpec = resolveModel(params.model, models);
 
 			const result = await runSubagent(
 				ctx.cwd,
 				modelSpec,
-				params.task!,
+				params.task,
 				params.context,
 				params.tools,
 				signal,
@@ -913,39 +1048,27 @@ export default function (pi: ExtensionAPI) {
 					? (r) =>
 							onUpdate({
 								content: [{ type: "text", text: r.output || "(running...)" }],
-								details: { mode: "single", results: [r], availableModels } as SubagentDetails,
+								details: { mode: "single", results: [r], availableModels: [...models.keys()] } as SubagentDetails,
 							})
 					: undefined,
 			);
 
-			// Record usage
 			if (result.usage.cost > 0 || result.usage.input > 0) {
 				recordUsage(result.usage, result.model, ctx);
 			}
 
+			// Throw on subagent failure so the agent loop marks isError
+			if (isResultError(result)) {
+				throw new Error(result.errorMessage || result.output || "Subagent failed");
+			}
+
 			return {
-				content: [{ type: "text", text: result.output || result.errorMessage || "(no output)" }],
-				details: { mode: "single", results: [result], availableModels } as SubagentDetails,
-				isError: isResultError(result),
+				content: [{ type: "text", text: result.output || "(no output)" }],
+				details: { mode: "single", results: [result], availableModels: [...models.keys()] } as SubagentDetails,
 			};
 		},
 
 		renderCall(args, theme) {
-			// Parallel mode
-			if (args.tasks && args.tasks.length > 0) {
-				let text = theme.fg("toolTitle", theme.bold("subagent "));
-				text += theme.fg("accent", `parallel (${args.tasks.length} tasks)`);
-				for (const t of args.tasks.slice(0, 3)) {
-					const preview = t.task.length > 40 ? t.task.slice(0, 40) + "..." : t.task;
-					text += `\n  ${theme.fg("accent", t.model)} ${theme.fg("dim", preview)}`;
-				}
-				if (args.tasks.length > 3) {
-					text += `\n  ${theme.fg("muted", `... +${args.tasks.length - 3} more`)}`;
-				}
-				return new Text(text, 0, 0);
-			}
-
-			// Single mode
 			const model = args.model || "?";
 			const task = args.task || "...";
 
@@ -963,245 +1086,114 @@ export default function (pi: ExtensionAPI) {
 			return new Text(text, 0, 0);
 		},
 
-		renderResult(result, { expanded }, theme) {
-			const details = result.details as SubagentDetails | undefined;
-			if (!details || details.results.length === 0) {
-				const text = result.content[0];
-				return new Text(text?.type === "text" ? text.text : "(no output)", 0, 0);
+		renderResult: sharedRenderResult,
+	});
+
+	// ── Parallel subagents tool ──
+	const TaskItem = Type.Object({
+		model: Type.String({ description: "Model ID" }),
+		task: Type.String({ description: "Task instruction" }),
+		context: Type.Optional(Type.String({ description: "Optional XML context" })),
+		tools: Type.Optional(Type.Array(Type.String(), { description: "Tool names to enable" })),
+	});
+
+	pi.registerTool({
+		name: "subagents",
+		label: "Subagents (parallel)",
+		description:
+			`Spawn multiple subagents in parallel. Each task runs concurrently with isolated context.\n\n${modelListXml}`,
+		parameters: Type.Object({
+			tasks: Type.Array(TaskItem, { description: `Array of tasks for parallel execution (max ${MAX_PARALLEL})`, minItems: 1 }),
+		}),
+
+		async execute(_id, params, signal, onUpdate, ctx) {
+			const models = getAvailableModels(ctx);
+			const availableModels = [...models.keys()];
+
+			if (params.tasks.length > MAX_PARALLEL) {
+				throw new Error(`Too many tasks (${params.tasks.length}). Max is ${MAX_PARALLEL}.`);
 			}
 
-			const mdTheme = getMarkdownTheme();
+			// Validate all models upfront (throws on bad model)
+			const resolvedModels = params.tasks.map((t) => resolveModel(t.model, models));
 
-			const aggregateUsage = (results: SubagentResult[]): UsageStats => {
-				const total = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
-				for (const r of results) {
-					total.input += r.usage.input;
-					total.output += r.usage.output;
-					total.cacheRead += r.usage.cacheRead;
-					total.cacheWrite += r.usage.cacheWrite;
-					total.cost += r.usage.cost;
-					total.turns += r.usage.turns;
+			const allResults: SubagentResult[] = params.tasks.map((t, i) => ({
+				model: resolvedModels[i],
+				task: t.task,
+				context: t.context,
+				exitCode: -1,
+				output: "",
+				messages: [],
+				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 },
+			}));
+
+			const emitUpdate = () => {
+				if (onUpdate) {
+					const done = allResults.filter((r) => r.exitCode !== -1).length;
+					const running = allResults.length - done;
+					onUpdate({
+						content: [{ type: "text", text: `${done}/${allResults.length} done, ${running} running...` }],
+						details: { mode: "parallel", results: allResults, availableModels } as SubagentDetails,
+					});
 				}
-				return total;
 			};
 
-			const renderSingleResult = (r: SubagentResult, showHeader: boolean, showExpanded: boolean) => {
-				const isError = r.exitCode !== -1 && isResultError(r);
-				const icon = r.exitCode === -1
-					? theme.fg("warning", "⏳")
-					: isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
-				const displayItems = getDisplayItems(getDisplayMessages(r));
-				const finalOutput = getFinalOutput(r.messages);
-				const toolCalls = displayItems.filter((i) => i.type === "toolCall");
+			emitUpdate();
 
-				const container = new Container();
+			await mapWithConcurrency(params.tasks, MAX_CONCURRENCY, async (t: { model: string; task: string; context?: string; tools?: string[] }, index) => {
+				const result = await runSubagent(
+					ctx.cwd,
+					resolvedModels[index],
+					t.task,
+					t.context,
+					t.tools,
+					signal,
+					(r) => {
+						allResults[index] = r;
+						emitUpdate();
+					},
+				);
+				allResults[index] = result;
+				emitUpdate();
+				return result;
+			});
 
-				if (showHeader) {
-					let header = `${icon} ${theme.fg("accent", r.model)}`;
-					if (isError && r.stopReason) header += ` ${theme.fg("error", `[${r.stopReason}]`)}`;
-					container.addChild(new Text(header, 0, 0));
+			const successCount = allResults.filter((r) => !isResultError(r)).length;
+			const fullOutputs = allResults.map((r, i) => {
+				const status = isResultError(r) ? "✗" : "✓";
+				const header = `[${i + 1}/${allResults.length}] ${status} ${r.model}`;
+				const body = r.output || r.errorMessage || "(no output)";
+				return `${header}\n${body}`;
+			});
+
+			for (const r of allResults) {
+				if (r.usage.cost > 0 || r.usage.input > 0) {
+					recordUsage(r.usage, r.model, ctx);
 				}
+			}
 
-				if (r.errorMessage) {
-					container.addChild(new Text(theme.fg("error", r.errorMessage), 0, 0));
-				}
-
-				// Task
-				container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
-
-				// Tool calls
-				for (const item of toolCalls) {
-					if (item.type === "toolCall") {
-						if (showExpanded) {
-							container.addChild(new Spacer(1));
-							container.addChild(renderToolCallExpanded(item.name, item.args, item.result, theme, true));
-						} else {
-							container.addChild(new Text(
-								theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, theme.fg.bind(theme)),
-								0, 0
-							));
-						}
-					}
-				}
-
-				// Output
-				if (finalOutput) {
-					container.addChild(new Spacer(1));
-					container.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
-				} else if (r.exitCode === -1) {
-					container.addChild(new Text(theme.fg("muted", "(running...)"), 0, 0));
-				}
-
-				// Usage
-				if (r.exitCode !== -1) {
-					container.addChild(new Text(theme.fg("dim", formatUsage(r.usage, r.model)), 0, 0));
-				}
-
-				return container;
+			// Don't throw on partial failure — report results, let model decide
+			return {
+				content: [{ type: "text", text: `${successCount}/${allResults.length} succeeded\n\n${fullOutputs.join("\n\n---\n\n")}` }],
+				details: { mode: "parallel", results: allResults, availableModels } as SubagentDetails,
 			};
+		},
 
-			// Single mode
-			if (details.mode === "single") {
-				const r = details.results[0];
-				const isRunning = r.exitCode === -1;
-				const isError = !isRunning && isResultError(r);
-				const icon = isRunning
-					? theme.fg("warning", "⏳")
-					: isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
-
-				if (expanded) {
-					const container = new Container();
-					const displayItems = getDisplayItems(getDisplayMessages(r));
-					const finalOutput = getFinalOutput(r.messages);
-					const toolCalls = displayItems.filter((i) => i.type === "toolCall");
-
-					// Just show status icon + error if any (model/task already in renderCall)
-					if (isError) {
-						let statusLine = icon;
-						if (r.stopReason) statusLine += ` ${theme.fg("error", `[${r.stopReason}]`)}`;
-						if (r.errorMessage) statusLine += ` ${theme.fg("error", r.errorMessage)}`;
-						container.addChild(new Text(statusLine, 0, 0));
-					}
-
-					// Context
-					if (r.context) {
-						container.addChild(new Spacer(1));
-						container.addChild(new Text(theme.fg("muted", "─── Context ───"), 0, 0));
-						container.addChild(new Text(theme.fg("dim", r.context), 0, 0));
-					}
-
-					// Tool calls
-					if (toolCalls.length > 0) {
-						container.addChild(new Spacer(1));
-						container.addChild(new Text(theme.fg("muted", "─── Tool Calls ───"), 0, 0));
-						for (const item of toolCalls) {
-							if (item.type === "toolCall") {
-								container.addChild(new Spacer(1));
-								container.addChild(renderToolCallExpanded(item.name, item.args, item.result, theme, true));
-							}
-						}
-					}
-
-					// Output
-					container.addChild(new Spacer(1));
-					container.addChild(new Text(theme.fg("muted", "─── Output ───"), 0, 0));
-					const finalOut = getFinalOutput(r.messages);
-					if (finalOut) {
-						container.addChild(new Markdown(finalOut.trim(), 0, 0, mdTheme));
-					} else {
-						container.addChild(new Text(theme.fg("muted", "(no output)"), 0, 0));
-					}
-
-					// Usage
-					container.addChild(new Spacer(1));
-					container.addChild(new Text(theme.fg("dim", formatUsage(r.usage, r.model)), 0, 0));
-
-					return container;
-				}
-
-				// Collapsed single
-				let text = `${icon} ${theme.fg("accent", r.model)}`;
-				if (isError && r.errorMessage) {
-					text += ` ${theme.fg("error", r.errorMessage)}`;
-				} else if (r.output) {
-					const allLines = r.output.split("\n");
-					const totalLines = allLines.length;
-					// Filter to non-empty lines for meaningful preview
-					const nonEmptyLines = allLines.filter(l => l.trim() !== "");
-					const previewLines = nonEmptyLines.slice(0, 5);
-					const remaining = totalLines - 5;
-					if (previewLines.length > 0) {
-						text += "\n" + theme.fg("toolOutput", previewLines.join("\n"));
-					}
-					if (remaining > 0) {
-						text += "\n" + theme.fg("muted", `... (${remaining} more lines, Ctrl+O to expand)`);
-					}
-				} else {
-					text += " " + theme.fg("muted", "(no output)");
-				}
-				text += "\n" + theme.fg("dim", formatUsage(r.usage, r.model));
-				return new Text(text, 0, 0);
+		renderCall(args, theme) {
+			let text = theme.fg("toolTitle", theme.bold("subagents "));
+			const tasks = args.tasks || [];
+			text += theme.fg("accent", `parallel (${tasks.length} tasks)`);
+			for (const t of tasks.slice(0, 3)) {
+				const preview = t.task.length > 40 ? t.task.slice(0, 40) + "..." : t.task;
+				text += `\n  ${theme.fg("accent", t.model)} ${theme.fg("dim", preview)}`;
 			}
-
-			// Parallel mode
-			const running = details.results.filter((r) => r.exitCode === -1).length;
-			const done = details.results.filter((r) => r.exitCode !== -1);
-			const successCount = done.filter((r) => !isResultError(r)).length;
-			const failCount = done.filter((r) => isResultError(r)).length;
-			const isRunning = running > 0;
-			const icon = isRunning
-				? theme.fg("warning", "⏳")
-				: failCount > 0
-					? theme.fg("warning", "◐")
-					: theme.fg("success", "✓");
-			const status = isRunning
-				? `${successCount + failCount}/${details.results.length} done, ${running} running`
-				: `${successCount}/${details.results.length} succeeded`;
-
-			if (expanded) {
-				const container = new Container();
-				container.addChild(new Text(
-					`${icon} ${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("accent", `parallel ${status}`)}`,
-					0, 0
-				));
-
-				for (const r of details.results) {
-					container.addChild(new Spacer(1));
-					container.addChild(new Text(theme.fg("muted", "────────────────────"), 0, 0));
-					container.addChild(renderSingleResult(r, true, true));
-				}
-
-				if (!isRunning) {
-					const totalUsage = aggregateUsage(details.results);
-					container.addChild(new Spacer(1));
-					container.addChild(new Text(theme.fg("dim", `Total: ${formatUsage(totalUsage, "")}`), 0, 0));
-				}
-
-				return container;
-			}
-
-			// Collapsed parallel
-			let text = `${icon} ${theme.fg("toolTitle", theme.bold("parallel "))}${theme.fg("accent", status)}`;
-			for (const r of details.results) {
-				const rIcon = r.exitCode === -1
-					? theme.fg("warning", "⏳")
-					: isResultError(r) ? theme.fg("error", "✗") : theme.fg("success", "✓");
-				let preview: string;
-				if (r.output) {
-					preview = (r.output.length > 60 ? r.output.slice(0, 60) + "..." : r.output).split("\n")[0];
-				} else if (r.exitCode === -1) {
-					// Show tool call activity while running
-					const toolCalls = getDisplayItems(getDisplayMessages(r)).filter(i => i.type === "toolCall");
-					if (toolCalls.length > 0) {
-						const last = toolCalls[toolCalls.length - 1];
-						// last is guaranteed to be toolCall type from filter
-						const name = last.name.toLowerCase();
-						if (name === "bash") {
-							const cmd = (last.args.command as string) ?? "";
-							preview = `$ ${cmd.slice(0, 40)}${cmd.length > 40 ? "..." : ""}`;
-						} else if (name === "read" || name === "write" || name === "edit") {
-							const p = shortenPath((last.args.path || last.args.file_path || "") as string);
-							preview = `${name} ${p}`;
-						} else {
-							preview = `${name}...`;
-						}
-					} else {
-						preview = "(starting...)";
-					}
-				} else {
-					preview = "(no output)";
-				}
-				text += `\n${rIcon} ${theme.fg("accent", r.model)} ${theme.fg("dim", preview)}`;
-			}
-			if (!isRunning) {
-				const totalUsage = aggregateUsage(details.results);
-				text += `\n${theme.fg("dim", `Total: ${formatUsage(totalUsage, "")}`)}`;
-			}
-			if (!expanded) {
-				text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
+			if (tasks.length > 3) {
+				text += `\n  ${theme.fg("muted", `... +${tasks.length - 3} more`)}`;
 			}
 			return new Text(text, 0, 0);
 		},
+
+		renderResult: sharedRenderResult,
 	});
 
 	// Command: /subagent <model> <task>
@@ -1214,7 +1206,6 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			// Let the LLM figure out model vs task
 			pi.sendUserMessage(`Use a subagent: ${args.trim()}`);
 		},
 	});
