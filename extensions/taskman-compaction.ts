@@ -31,7 +31,7 @@ const HANDOFF_SKILL_PATH = path.join(os.homedir(), ".pi/agent/skills/taskman/han
 
 const HANDOFF_REQUEST = `Context is getting long. Run /handoff to checkpoint our progress.
 
-Use the read tool to load the /handoff skill from ~/.pi/agent/skills/taskman/handoff.md, then follow its instructions. You can batch multiple tool calls.
+Use the read tool to load the /handoff skill from ${HANDOFF_SKILL_PATH}, then follow its instructions. You can batch multiple tool calls.
 
 The summary you produce will replace the conversation history, so include everything needed to continue.`;
 
@@ -192,6 +192,11 @@ When summarizing:
 						.filter((c): c is { type: "text"; text: string } => c.type === "text")
 						.map((c) => c.text)
 						.join("\n");
+					// Truncated output → fall back to default compaction rather than lose context
+					if (response.stopReason === "length") {
+						ctx.ui.notify("Compaction summary was truncated, using default", "warning");
+						return;
+					}
 					break;
 				}
 
