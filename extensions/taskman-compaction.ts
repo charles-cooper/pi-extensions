@@ -149,6 +149,7 @@ When summarizing:
 			// Agent loop
 			for (let turn = 0; turn < maxTurns; turn++) {
 				if (signal.aborted) throw new Error("Compaction cancelled");
+				ctx.ui.setStatus("compaction", `✎ handoff turn ${turn + 1}/${maxTurns}…`);
 
 				// Cap output tokens — summarization doesn't need full model budget
 				// Floor at 4096 in case reserveTokens is very small
@@ -180,6 +181,7 @@ When summarizing:
 				const toolResults = await Promise.all(toolCalls.map(async (tc) => {
 					const tool = toolMap.get(tc.name);
 					if (!tool) {
+						ctx.ui.notify(`⚠ compaction: unknown tool ${tc.name}`, "warning");
 						return {
 							role: "toolResult" as const,
 							toolCallId: tc.id,
@@ -189,6 +191,10 @@ When summarizing:
 							timestamp: Date.now(),
 						};
 					}
+					// Surface file operations to the user
+					const filePath = tc.arguments?.path as string | undefined;
+					const label = filePath ? `${tc.name} ${filePath}` : tc.name;
+					ctx.ui.setStatus("compaction", `✎ ${label}`);
 					try {
 						const result = await tool.execute(tc.id, tc.arguments, signal);
 						return {
@@ -201,6 +207,7 @@ When summarizing:
 						};
 					} catch (err) {
 						const errMsg = err instanceof Error ? err.message : String(err);
+						ctx.ui.notify(`⚠ compaction ${label}: ${errMsg}`, "warning");
 						return {
 							role: "toolResult" as const,
 							toolCallId: tc.id,
@@ -224,6 +231,8 @@ When summarizing:
 				];
 			}
 
+			ctx.ui.setStatus("compaction", undefined);
+
 			if (!summary.trim()) {
 				ctx.ui.notify("Compaction summary was empty, using default", "warning");
 				return;
@@ -243,6 +252,7 @@ When summarizing:
 				},
 			};
 		} catch (error) {
+			ctx.ui.setStatus("compaction", undefined);
 			if (signal.aborted) return;
 			const message = error instanceof Error ? error.message : String(error);
 			// Include model info in error for debugging 422 errors
