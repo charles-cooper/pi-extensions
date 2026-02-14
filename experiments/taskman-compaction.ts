@@ -140,7 +140,7 @@ When summarizing:
 			},
 		];
 
-		const maxTurns = 10;
+		const maxTurns = 6;
 		let summary = "";
 
 		try {
@@ -148,10 +148,13 @@ When summarizing:
 			for (let turn = 0; turn < maxTurns; turn++) {
 				if (signal.aborted) throw new Error("Compaction cancelled");
 
+				// Cap output tokens — summarization doesn't need full model budget
+				// Floor at 4096 in case reserveTokens is very small
+				const maxTokens = Math.max(4096, Math.min(8192, Math.floor(settings.reserveTokens * 0.5)));
 				const response = await completeSimple(
 					model,
 					{ systemPrompt, messages, tools: toolDefs },
-					{ apiKey, maxTokens: model.maxTokens, signal, reasoning: "high" },
+					{ apiKey, maxTokens, signal, reasoning: "medium" },
 				);
 
 				// Check for tool calls
@@ -205,13 +208,15 @@ When summarizing:
 				}));
 
 				// Add assistant response and tool results to messages
-				// Filter out thinking blocks to avoid API issues on subsequent turns
+				// Strip thinking blocks (API rejects them in non-final assistant turns)
+				// Use blocklist so future content types aren't silently dropped
 				const assistantContent = response.content.filter(
-					(c) => c.type === "text" || c.type === "toolCall"
+					(c) => c.type !== "thinking"
 				);
+				// Spread full response to preserve metadata (model, provider, usage, etc.)
 				messages = [
 					...messages,
-					{ role: "assistant" as const, content: assistantContent, timestamp: Date.now() } as Message,
+					{ ...response, content: assistantContent } as Message,
 					...toolResults,
 				];
 			}
