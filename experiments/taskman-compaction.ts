@@ -15,8 +15,8 @@
  * Or add to ~/.pi/settings.jsonl:
  *   {"extensions": ["~/pi-extensions/extensions/taskman-compaction.ts"]}
  *
- * Recommended settings for earlier compaction (~70% instead of ~92%):
- *   {"compaction": {"reserveTokens": 60000}}
+ * Recommended settings (triggers compaction earlier, required for context budget):
+ *   {"compaction": {"reserveTokens": 40000}}
  */
 
 import * as fs from "node:fs";
@@ -70,7 +70,15 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_before_compact", async (event, ctx) => {
 		continueMessageSent = false; // Reset for next compaction
 		const { preparation, signal } = event;
-		const { messagesToSummarize, turnPrefixMessages, tokensBefore, firstKeptEntryId, previousSummary } = preparation;
+		const { messagesToSummarize, turnPrefixMessages, tokensBefore, firstKeptEntryId, previousSummary, fileOps, settings } = preparation;
+
+		// Warn if reserveTokens is too low for multi-turn agent loop
+		if (settings.reserveTokens < 40000) {
+			ctx.ui.notify(
+				`reserveTokens is ${settings.reserveTokens} (recommend ≥40000 for taskman compaction). Add {"compaction":{"reserveTokens":40000}} to settings.jsonl`,
+				"warning"
+			);
+		}
 
 		// Check if taskman is available
 		if (!checkTaskmanAvailable()) {
@@ -160,7 +168,7 @@ When summarizing:
 					break;
 				}
 
-				// Execute all tool calls (batched)
+				// Execute all tool calls (batched, per-tool error isolation)
 				const toolResults = await Promise.all(toolCalls.map(async (tc) => {
 					const tool = toolMap.get(tc.name);
 					if (!tool) {
@@ -173,15 +181,27 @@ When summarizing:
 							timestamp: Date.now(),
 						};
 					}
-					const result = await tool.execute(tc.id, tc.arguments, signal);
-					return {
-						role: "toolResult" as const,
-						toolCallId: tc.id,
-						toolName: tc.name,
-						content: result.content,
-						isError: false,
-						timestamp: Date.now(),
-					};
+					try {
+						const result = await tool.execute(tc.id, tc.arguments, signal);
+						return {
+							role: "toolResult" as const,
+							toolCallId: tc.id,
+							toolName: tc.name,
+							content: result.content,
+							isError: false,
+							timestamp: Date.now(),
+						};
+					} catch (err) {
+						const errMsg = err instanceof Error ? err.message : String(err);
+						return {
+							role: "toolResult" as const,
+							toolCallId: tc.id,
+							toolName: tc.name,
+							content: [{ type: "text" as const, text: `Error: ${errMsg}` }],
+							isError: true,
+							timestamp: Date.now(),
+						};
+					}
 				}));
 
 				// Add assistant response and tool results to messages
@@ -201,11 +221,17 @@ When summarizing:
 				return;
 			}
 
+			// Compute file lists from preparation's fileOps for continuity with default compaction
+			const modified = new Set([...fileOps.edited, ...fileOps.written]);
+			const readFiles = [...fileOps.read].filter(f => !modified.has(f)).sort();
+			const modifiedFiles = [...modified].sort();
+
 			return {
 				compaction: {
 					summary,
 					firstKeptEntryId,
 					tokensBefore,
+					details: { readFiles, modifiedFiles },
 				},
 			};
 		} catch (error) {
