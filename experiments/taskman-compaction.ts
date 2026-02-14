@@ -42,11 +42,13 @@ function checkTaskmanAvailable(): boolean {
 export default function (pi: ExtensionAPI) {
 	// Track if we've already sent the continue message for this compaction
 	let continueMessageSent = false;
-	// Track whether compaction was auto-triggered (after agent_end) vs manual (/compact)
-	let wasAutoCompaction = false;
+	// Detect auto vs manual compaction via timing:
+	// auto-compaction fires session_before_compact within ~10ms of agent_end,
+	// manual /compact always has seconds+ of user interaction delay.
+	let lastAgentEndTime = 0;
+	let isCurrentCompactionAuto = false;
 
-	pi.on("agent_end", () => { wasAutoCompaction = true; });
-	pi.on("input", () => { wasAutoCompaction = false; });
+	pi.on("agent_end", () => { lastAgentEndTime = Date.now(); });
 
 	// After compaction, inject continue guidance
 	pi.on("session_compact", async (event, ctx) => {
@@ -54,8 +56,7 @@ export default function (pi: ExtensionAPI) {
 		if (continueMessageSent) return; // Prevent duplicate
 		continueMessageSent = true;
 
-		const isAuto = wasAutoCompaction;
-		wasAutoCompaction = false;
+		const isAuto = isCurrentCompactionAuto;
 
 		pi.sendMessage(
 			{
@@ -72,6 +73,9 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_before_compact", async (event, ctx) => {
 		continueMessageSent = false; // Reset for next compaction
+		// Capture auto vs manual before the long LLM calls.
+		// Auto-compaction fires <100ms after agent_end; manual has seconds+ of delay.
+		isCurrentCompactionAuto = (Date.now() - lastAgentEndTime) < 5000;
 		const { preparation, signal } = event;
 		const { messagesToSummarize, turnPrefixMessages, tokensBefore, firstKeptEntryId, previousSummary } = preparation;
 
