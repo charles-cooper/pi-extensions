@@ -43,14 +43,17 @@ export default function (pi: ExtensionAPI) {
 	// Track if we've already sent the continue message for this compaction
 	let continueMessageSent = false;
 
-	// After compaction, inject continue guidance then auto-continue if nobody else does.
-	// Overflow recovery calls agent.continue() at 100ms; we check at 500ms to avoid conflict.
+	// After compaction, auto-continue so the agent re-orients with the summary.
+	// For overflow: framework also calls agent.continue() at 100ms — ours wins (starts first),
+	// framework's continue() throws "already processing" and is silently swallowed. Fine.
+	// For queued messages: skip — framework's continue() handles delivery.
 	pi.on("session_compact", async (event, ctx) => {
 		if (!event.fromExtension) return;
-		if (continueMessageSent) return; // Prevent duplicate
+		if (continueMessageSent) return;
 		continueMessageSent = true;
 
-		// Inject guidance into context (always)
+		if (ctx.hasPendingMessages()) return; // Let framework handle queued messages
+
 		pi.sendMessage(
 			{
 				customType: "compaction_continue",
@@ -60,20 +63,8 @@ export default function (pi: ExtensionAPI) {
 3. Continue where you left off`,
 				display: false,
 			},
-			{ triggerTurn: false },
+			{ triggerTurn: true },
 		);
-
-		// Auto-continue if no one else starts the agent.
-		// Framework fires agent.continue() at 100ms for overflow/queued cases.
-		// If agent is still idle at 500ms, it's threshold compaction — we trigger.
-		setTimeout(() => {
-			if (ctx.isIdle() && !ctx.hasPendingMessages()) {
-				pi.sendMessage(
-					{ customType: "compaction_auto_continue", content: "Continue from where you left off.", display: false },
-					{ triggerTurn: true },
-				);
-			}
-		}, 500);
 	});
 
 	pi.on("session_before_compact", async (event, ctx) => {
