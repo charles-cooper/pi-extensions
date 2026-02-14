@@ -213,15 +213,13 @@ When summarizing:
 				}));
 
 				// Add assistant response and tool results to messages
-				// Strip thinking blocks (API rejects them in non-final assistant turns)
-				// Use blocklist so future content types aren't silently dropped
-				const assistantContent = response.content.filter(
-					(c) => c.type !== "thinking"
-				);
-				// Spread full response to preserve metadata (model, provider, usage, etc.)
+				// Keep thinking blocks — completeSimple's transform pipeline handles them:
+				// transformMessages() preserves thinking for same-model, converts to text for
+				// cross-model. convertMessages() handles signature validation. No need to strip.
+				// Spread response to preserve metadata (model, provider, api) for isSameModel checks.
 				messages = [
 					...messages,
-					{ ...response, content: assistantContent } as Message,
+					{ ...response } as Message,
 					...toolResults,
 				];
 			}
