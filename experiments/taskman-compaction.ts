@@ -22,7 +22,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
-import { complete } from "@mariozechner/pi-ai";
+import { completeSimple } from "@mariozechner/pi-ai";
 import type { Tool, Message, ToolCall } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { convertToLlm, createReadTool, createWriteTool, createEditTool } from "@mariozechner/pi-coding-agent";
@@ -135,10 +135,10 @@ When summarizing:
 			for (let turn = 0; turn < maxTurns; turn++) {
 				if (signal.aborted) throw new Error("Compaction cancelled");
 
-				const response = await complete(
+				const response = await completeSimple(
 					model,
 					{ systemPrompt, messages, tools: toolDefs },
-					{ apiKey, maxTokens: 8192, signal },
+					{ apiKey, maxTokens: model.maxTokens, signal, reasoning: "high" },
 				);
 
 				// Check for tool calls
