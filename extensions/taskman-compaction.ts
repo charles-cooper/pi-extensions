@@ -10,10 +10,10 @@
  * Falls back to default compaction if taskman not installed.
  *
  * Usage:
- *   pi --extension extensions/taskman-compaction.ts
+ *   pi --extension ~/pi-extensions/extensions/taskman-compaction.ts
  *
- * Or add to ~/.pi/settings.jsonl:
- *   {"extensions": ["~/pi-extensions/extensions/taskman-compaction.ts"]}
+ * Or install to ~/.pi/agent/extensions/ (loaded automatically):
+ *   cd ~/pi-extensions && bash install.sh
  *
  * Recommended settings (triggers compaction earlier, required for context budget):
  *   {"compaction": {"reserveTokens": 50000}}
