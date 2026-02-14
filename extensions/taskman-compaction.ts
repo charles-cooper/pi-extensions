@@ -25,7 +25,7 @@ import * as os from "node:os";
 import { completeSimple } from "@mariozechner/pi-ai";
 import type { Tool, Message, ToolCall } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { convertToLlm, createReadTool, createWriteTool, createEditTool } from "@mariozechner/pi-coding-agent";
+import { convertToLlm, createReadTool, createWriteTool, createEditTool, createBashTool } from "@mariozechner/pi-coding-agent";
 
 const HANDOFF_SKILL_PATH = path.join(os.homedir(), ".pi/agent/skills/taskman/handoff.md");
 
@@ -69,7 +69,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_before_compact", async (event, ctx) => {
 		continueMessageSent = false; // Reset for next compaction
-		const { preparation, signal } = event;
+		const { preparation, signal, customInstructions } = event;
 		const { messagesToSummarize, turnPrefixMessages, tokensBefore, firstKeptEntryId, previousSummary, fileOps, settings } = preparation;
 
 		// Warn if reserveTokens is too low for multi-turn agent loop
@@ -89,8 +89,16 @@ export default function (pi: ExtensionAPI) {
 			return; // Fall back to default
 		}
 
-		const model = ctx.model!;
-		const apiKey = (await ctx.modelRegistry.getApiKey(model))!;
+		const model = ctx.model;
+		if (!model) {
+			ctx.ui.notify("No model available for compaction, using default", "warning");
+			return;
+		}
+		const apiKey = await ctx.modelRegistry.getApiKey(model);
+		if (!apiKey) {
+			ctx.ui.notify(`No API key for ${model.provider}/${model.id}, using default compaction`, "warning");
+			return;
+		}
 
 		// Combine messages and convert to LLM format
 		const allMessages = [...messagesToSummarize, ...turnPrefixMessages];
@@ -109,6 +117,7 @@ export default function (pi: ExtensionAPI) {
 			createReadTool(ctx.cwd),
 			createWriteTool(ctx.cwd),
 			createEditTool(ctx.cwd),
+			createBashTool(ctx.cwd),
 		];
 		const toolDefs: Tool[] = agentTools.map(t => ({
 			name: t.name,
@@ -120,6 +129,10 @@ export default function (pi: ExtensionAPI) {
 		// Build initial messages with handoff request
 		const previousContext = previousSummary
 			? `\n\nPrevious checkpoint for reference:\n${previousSummary}`
+			: "";
+
+		const customContext = customInstructions
+			? `\n\nUser instructions for this compaction:\n${customInstructions}`
 			: "";
 
 		// System prompt for the compaction agent
@@ -135,7 +148,7 @@ When summarizing:
 			...llmMessages,
 			{
 				role: "user" as const,
-				content: [{ type: "text" as const, text: HANDOFF_REQUEST + previousContext }],
+				content: [{ type: "text" as const, text: HANDOFF_REQUEST + previousContext + customContext }],
 				timestamp: Date.now(),
 			},
 		];
@@ -162,6 +175,11 @@ When summarizing:
 					{ systemPrompt, messages, tools: toolDefs },
 					{ apiKey, maxTokens, signal, reasoning: "high" },
 				);
+
+				// Bail on errored/aborted responses before executing any tool calls
+				if (response.stopReason === "error" || response.stopReason === "aborted") {
+					throw new Error(response.errorMessage ?? `Compaction LLM failed (${response.stopReason})`);
+				}
 
 				// Check for tool calls
 				const toolCalls = response.content.filter(
