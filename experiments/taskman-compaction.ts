@@ -42,12 +42,20 @@ function checkTaskmanAvailable(): boolean {
 export default function (pi: ExtensionAPI) {
 	// Track if we've already sent the continue message for this compaction
 	let continueMessageSent = false;
+	// Track whether compaction was auto-triggered (after agent_end) vs manual (/compact)
+	let wasAutoCompaction = false;
+
+	pi.on("agent_end", () => { wasAutoCompaction = true; });
+	pi.on("input", () => { wasAutoCompaction = false; });
 
 	// After compaction, inject continue guidance
 	pi.on("session_compact", async (event, ctx) => {
 		if (!event.fromExtension) return;
 		if (continueMessageSent) return; // Prevent duplicate
 		continueMessageSent = true;
+
+		const isAuto = wasAutoCompaction;
+		wasAutoCompaction = false;
 
 		pi.sendMessage(
 			{
@@ -58,7 +66,7 @@ export default function (pi: ExtensionAPI) {
 3. Continue where you left off`,
 				display: false,
 			},
-			{ triggerTurn: false },
+			{ triggerTurn: isAuto },
 		);
 	});
 
