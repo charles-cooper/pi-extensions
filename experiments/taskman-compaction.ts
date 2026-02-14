@@ -16,7 +16,7 @@
  *   {"extensions": ["~/pi-extensions/extensions/taskman-compaction.ts"]}
  *
  * Recommended settings (triggers compaction earlier, required for context budget):
- *   {"compaction": {"reserveTokens": 40000}}
+ *   {"compaction": {"reserveTokens": 50000}}
  */
 
 import * as fs from "node:fs";
@@ -73,9 +73,9 @@ export default function (pi: ExtensionAPI) {
 		const { messagesToSummarize, turnPrefixMessages, tokensBefore, firstKeptEntryId, previousSummary, fileOps, settings } = preparation;
 
 		// Warn if reserveTokens is too low for multi-turn agent loop
-		if (settings.reserveTokens < 40000) {
+		if (settings.reserveTokens < 50000) {
 			ctx.ui.notify(
-				`reserveTokens is ${settings.reserveTokens} (recommend ≥40000 for taskman compaction). Add {"compaction":{"reserveTokens":40000}} to settings.jsonl`,
+				`reserveTokens is ${settings.reserveTokens} (recommend ≥50000 for taskman compaction). Add {"compaction":{"reserveTokens":50000}} to settings.jsonl`,
 				"warning"
 			);
 		}
