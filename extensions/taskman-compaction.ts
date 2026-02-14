@@ -140,7 +140,9 @@ When summarizing:
 			},
 		];
 
-		const maxTurns = 6;
+		// 10 turns: handoff skill is multi-step (read skill, read status, read mem,
+		// write handoff, write status, produce summary). 6 was too tight.
+		const maxTurns = 10;
 		let summary = "";
 
 		try {
@@ -151,10 +153,13 @@ When summarizing:
 				// Cap output tokens — summarization doesn't need full model budget
 				// Floor at 4096 in case reserveTokens is very small
 				const maxTokens = Math.max(4096, Math.min(8192, Math.floor(settings.reserveTokens * 0.5)));
+				// reasoning:high — compaction must identify what matters across a long
+				// conversation, synthesize breadcrumbs, and make good discard decisions.
+				// This is a high-stakes single-shot; cost/latency is acceptable.
 				const response = await completeSimple(
 					model,
 					{ systemPrompt, messages, tools: toolDefs },
-					{ apiKey, maxTokens, signal, reasoning: "medium" },
+					{ apiKey, maxTokens, signal, reasoning: "high" },
 				);
 
 				// Check for tool calls
