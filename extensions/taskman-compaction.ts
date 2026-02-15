@@ -133,13 +133,7 @@ export default function (pi: ExtensionAPI) {
 			: "";
 
 		// System prompt for the compaction agent
-		const systemPrompt = `You are a context summarizer. Your job is to create concise summaries of conversations that preserve all important context for continuation.
-
-When summarizing:
-- Include key decisions, learnings, and current state
-- Use breadcrumbs (file:line references) for code context
-- Preserve critical details needed to continue work
-- Keep the summary focused and actionable`;
+		const systemPrompt = `You are a handoff agent. Read the skills you're given, follow their instructions using the provided tools, then output a final summary. The summary replaces the conversation history — it must contain everything needed to continue.`;
 
 		let messages: Message[] = [
 			...llmMessages,
