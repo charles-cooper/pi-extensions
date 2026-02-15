@@ -260,12 +260,6 @@ When summarizing:
 				return;
 			}
 
-			// Append continue instructions so the agent knows how to resume.
-			// This is the only message the agent sees after compaction (wrapped in <summary> by framework).
-			const TASKMAN_SKILL = path.join(os.homedir(), ".pi/agent/skills/taskman/SKILL.md");
-			const CONTINUE_SKILL = path.join(os.homedir(), ".pi/agent/skills/taskman/continue.md");
-			summary += `\n\nTo resume: read the taskman skill from ${TASKMAN_SKILL} and the /continue skill from ${CONTINUE_SKILL}, then follow their instructions.`;
-
 			// Compute file lists from preparation's fileOps for continuity with default compaction
 			const modified = new Set([...fileOps.edited, ...fileOps.written]);
 			const readFiles = [...fileOps.read].filter(f => !modified.has(f)).sort();
