@@ -216,8 +216,10 @@ When summarizing:
 					}
 					// Surface file operations to the user
 					const filePath = tc.arguments?.path as string | undefined;
-					const label = filePath ? `${tc.name} ${filePath}` : tc.name;
+					const cmd = tc.arguments?.command as string | undefined;
+					const label = filePath ? `${tc.name} ${filePath}` : cmd ? `bash: ${cmd}` : tc.name;
 					ctx.ui.setStatus("compaction", `✎ ${label}`);
+					ctx.ui.notify(`✎ ${label}`, "info");
 					try {
 						const result = await tool.execute(tc.id, tc.arguments, signal);
 						return {
