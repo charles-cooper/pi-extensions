@@ -54,10 +54,12 @@ export default function (pi: ExtensionAPI) {
 		if (continueMessageSent) return;
 		continueMessageSent = true;
 		if (ctx.hasPendingMessages()) return;
-		// No message needed — continue instructions are in the summary itself.
-		// Just kick the agent to act on it.
 		pi.sendMessage(
-			{ customType: "compaction_continue", content: "", display: false },
+			{
+				customType: "compaction_continue",
+				content: "Load /taskman skill and /continue the task specified in the handoff.",
+				display: false,
+			},
 			{ triggerTurn: true },
 		);
 	});
