@@ -44,25 +44,20 @@ function checkTaskmanAvailable(): boolean {
 
 export default function (pi: ExtensionAPI) {
 	// Track if we've already sent the continue message for this compaction
-	let continueMessageSent = false;
-
-	// After compaction, auto-continue so the agent re-orients with the summary.
+	// After compaction, auto-continue so the agent acts on the summary.
 	// For overflow: framework also calls agent.continue() at 100ms — ours wins (starts first),
 	// framework's continue() throws "already processing" and is silently swallowed. Fine.
 	// For queued messages: skip — framework's continue() handles delivery.
+	let continueMessageSent = false;
 	pi.on("session_compact", async (event, ctx) => {
 		if (!event.fromExtension) return;
 		if (continueMessageSent) return;
 		continueMessageSent = true;
-
-		if (ctx.hasPendingMessages()) return; // Let framework handle queued messages
-
+		if (ctx.hasPendingMessages()) return;
+		// No message needed — continue instructions are in the summary itself.
+		// Just kick the agent to act on it.
 		pi.sendMessage(
-			{
-				customType: "compaction_continue",
-				content: `Context was compacted. Read the taskman skill from ${path.join(os.homedir(), ".pi/agent/skills/taskman/SKILL.md")} and the /continue skill from ${path.join(os.homedir(), ".pi/agent/skills/taskman/continue.md")}, then follow their instructions to resume.`,
-				display: false,
-			},
+			{ customType: "compaction_continue", content: "", display: false },
 			{ triggerTurn: true },
 		);
 	});
@@ -262,6 +257,12 @@ When summarizing:
 				ctx.ui.notify("Compaction summary was empty, using default", "warning");
 				return;
 			}
+
+			// Append continue instructions so the agent knows how to resume.
+			// This is the only message the agent sees after compaction (wrapped in <summary> by framework).
+			const TASKMAN_SKILL = path.join(os.homedir(), ".pi/agent/skills/taskman/SKILL.md");
+			const CONTINUE_SKILL = path.join(os.homedir(), ".pi/agent/skills/taskman/continue.md");
+			summary += `\n\nTo resume: read the taskman skill from ${TASKMAN_SKILL} and the /continue skill from ${CONTINUE_SKILL}, then follow their instructions.`;
 
 			// Compute file lists from preparation's fileOps for continuity with default compaction
 			const modified = new Set([...fileOps.edited, ...fileOps.written]);
