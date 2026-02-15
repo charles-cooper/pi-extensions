@@ -60,7 +60,7 @@ export default function (pi: ExtensionAPI) {
 		pi.sendMessage(
 			{
 				customType: "compaction_continue",
-				content: `Context was compacted. Read the /continue skill from ${path.join(os.homedir(), ".pi/agent/skills/taskman/continue.md")} and follow its instructions to resume.`,
+				content: `Context was compacted. Read the taskman skill from ${path.join(os.homedir(), ".pi/agent/skills/taskman/SKILL.md")} and the /continue skill from ${path.join(os.homedir(), ".pi/agent/skills/taskman/continue.md")}, then follow their instructions to resume.`,
 				display: false,
 			},
 			{ triggerTurn: true },
