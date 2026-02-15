@@ -144,9 +144,10 @@ export default function (pi: ExtensionAPI) {
 			},
 		];
 
-		// 15 turns: /remember + /handoff is multi-step (read 2 skills, read status,
-		// read/write topics+memory, write handoff+status, taskman sync, produce summary).
-		const maxTurns = 15;
+		// Generous limit — /remember + /handoff involve many file reads/writes,
+		// especially when there are multiple topics to persist. Each LLM turn is
+		// the real cost; tool execution is cheap.
+		const maxTurns = 30;
 		let summary = "";
 
 		try {
