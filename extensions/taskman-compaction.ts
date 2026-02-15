@@ -260,15 +260,10 @@ export default function (pi: ExtensionAPI) {
 			const readFiles = [...fileOps.read].filter(f => !modified.has(f)).sort();
 			const modifiedFiles = [...modified].sort();
 
-			// Don't keep recent messages — everything is saved to handoff files.
-			// Use last branch entry so the framework keeps ~nothing (just that one entry).
-			// When we fall back to default compaction, its own keepRecentTokens still applies.
-			const lastEntryId = event.branchEntries[event.branchEntries.length - 1]?.id ?? firstKeptEntryId;
-
 			return {
 				compaction: {
 					summary,
-					firstKeptEntryId: lastEntryId,
+					firstKeptEntryId,
 					tokensBefore,
 					details: { readFiles, modifiedFiles },
 				},
