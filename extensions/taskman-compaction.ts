@@ -153,9 +153,9 @@ When summarizing:
 			},
 		];
 
-		// 10 turns: handoff skill is multi-step (read skill, read status, read mem,
-		// write handoff, write status, produce summary). 6 was too tight.
-		const maxTurns = 10;
+		// 15 turns: /remember + /handoff is multi-step (read 2 skills, read status,
+		// read/write topics+memory, write handoff+status, taskman sync, produce summary).
+		const maxTurns = 15;
 		let summary = "";
 
 		try {
