@@ -250,7 +250,7 @@ export default function (pi: ExtensionAPI) {
 
 			if (!summary.trim()) {
 				ctx.ui.notify("Compaction agent produced empty summary", "warning");
-				summary = "Compaction agent did not produce a summary. Check handoff files for context.";
+				summary = "/taskman continue";
 			}
 
 			// Compute file lists from preparation's fileOps for continuity with default compaction
@@ -275,7 +275,7 @@ export default function (pi: ExtensionAPI) {
 			// Never fall back to default — return minimal summary to keep context clean
 			return {
 				compaction: {
-					summary: `Compaction failed: ${message}. Check handoff files for context.`,
+					summary: "/taskman continue",
 					firstKeptEntryId,
 					tokensBefore,
 					details: {},
