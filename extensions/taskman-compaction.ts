@@ -249,8 +249,8 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.setStatus("compaction", undefined);
 
 			if (!summary.trim()) {
-				ctx.ui.notify("Compaction summary was empty, using default", "warning");
-				return;
+				ctx.ui.notify("Compaction agent produced empty summary", "warning");
+				summary = "Compaction agent did not produce a summary. Check handoff files for context.";
 			}
 
 			// Compute file lists from preparation's fileOps for continuity with default compaction
@@ -270,16 +270,17 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.setStatus("compaction", undefined);
 			if (signal.aborted) return;
 			const message = error instanceof Error ? error.message : String(error);
-			// Include model info in error for debugging 422 errors
-			const modelInfo = `${model.provider}/${model.id}`;
-			ctx.ui.notify(`Taskman compaction failed (${modelInfo}): ${message}`, "error");
-			console.error("[taskman-compaction] Error details:", {
-				model: modelInfo,
-				error: message,
-				messagesCount: messages.length,
-				lastMessageRole: messages[messages.length - 1]?.role,
-			});
-			return;
+			ctx.ui.notify(`Taskman compaction failed: ${message}`, "error");
+
+			// Never fall back to default — return minimal summary to keep context clean
+			return {
+				compaction: {
+					summary: `Compaction failed: ${message}. Check handoff files for context.`,
+					firstKeptEntryId,
+					tokensBefore,
+					details: {},
+				},
+			};
 		}
 	});
 }
