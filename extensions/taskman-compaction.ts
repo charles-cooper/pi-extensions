@@ -50,7 +50,6 @@ export default function (pi: ExtensionAPI) {
 	// For queued messages: skip — framework's continue() handles delivery.
 	let continueMessageSent = false;
 	pi.on("session_compact", async (event, ctx) => {
-		if (!event.fromExtension) return;
 		if (continueMessageSent) return;
 		continueMessageSent = true;
 		if (ctx.hasPendingMessages()) return;
