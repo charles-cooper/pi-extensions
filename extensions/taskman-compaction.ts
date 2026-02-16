@@ -154,15 +154,19 @@ export default function (pi: ExtensionAPI) {
 				if (signal.aborted) throw new Error("Compaction cancelled");
 				ctx.ui.setStatus("compaction", `✎ handoff turn ${turn + 1}/${maxTurns}…`);
 
-				// Cap output tokens — summarization doesn't need full model budget
-				// Floor at 4096 in case reserveTokens is very small
-				const maxTokens = Math.max(4096, Math.min(8192, Math.floor(settings.reserveTokens * 0.5)));
-				// reasoning:high — compaction must identify what matters across a long
-				// conversation, synthesize breadcrumbs, and make good discard decisions.
-				// This is a high-stakes single-shot; cost/latency is acceptable.
+				// 16384 base — thinking + output share this budget on Opus.
+				// With reasoning:high, thinking can consume 4-8K, so we need headroom
+				// for the final summary (~3K tokens).
+				const maxTokens = Math.max(16384, Math.floor(settings.reserveTokens * 0.5));
+
+				// Last 3 turns: remove tools to force text-only summary output.
+				// Without this, the model keeps finding "one more thing" to do.
+				const turnsLeft = maxTurns - turn;
+				const turnTools = turnsLeft <= 3 ? [] : toolDefs;
+
 				const response = await completeSimple(
 					model,
-					{ systemPrompt, messages, tools: toolDefs },
+					{ systemPrompt, messages, tools: turnTools },
 					{ apiKey, maxTokens, signal, reasoning: "high" },
 				);
 
