@@ -31,12 +31,13 @@ const HANDOFF_SKILL_PATH = path.join(os.homedir(), ".pi/agent/skills/taskman/han
 
 const REMEMBER_SKILL_PATH = path.join(os.homedir(), ".pi/agent/skills/taskman/remember.md");
 
-const HANDOFF_REQUEST = `Context is getting long. First /remember, then /handoff to checkpoint our progress.
+const HANDOFF_REQUEST = `Context is getting long. Your task:
 
 1. Read the /remember skill from ${REMEMBER_SKILL_PATH} and persist any reusable knowledge (learnings, patterns, decisions) to topics/memory files.
 2. Read the /handoff skill from ${HANDOFF_SKILL_PATH} and follow its instructions to save current state.
+3. Produce a final summary (text only, no tool calls) that will become the initial prompt for the next session.
 
-You can batch multiple tool calls. The summary you produce will replace the conversation history, so include everything needed to continue.`;
+You can batch multiple tool calls.`;
 
 function checkTaskmanAvailable(): boolean {
 	return fs.existsSync(HANDOFF_SKILL_PATH);
