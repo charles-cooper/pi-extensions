@@ -131,7 +131,9 @@ export default function (pi: ExtensionAPI) {
 			: "";
 
 		// System prompt for the compaction agent
-		const systemPrompt = `You are a handoff agent. Read the skills you're given, follow their instructions using the provided tools, then output a final summary. The summary replaces the conversation history — it must contain everything needed to continue.`;
+		const systemPrompt = `You are a handoff agent. Read the skills you're given, follow their instructions using the provided tools, then output a final text summary with NO tool calls. The summary replaces the conversation history — it must contain everything needed to continue.
+
+IMPORTANT: When you are done with all tool calls, you MUST respond with ONLY text (no tool calls) containing your summary. This text-only response is how the system knows you are finished.`;
 
 		let messages: Message[] = [
 			...llmMessages,
@@ -154,19 +156,11 @@ export default function (pi: ExtensionAPI) {
 				if (signal.aborted) throw new Error("Compaction cancelled");
 				ctx.ui.setStatus("compaction", `✎ handoff turn ${turn + 1}/${maxTurns}…`);
 
-				// 16384 base — thinking + output share this budget on Opus.
-				// With reasoning:high, thinking can consume 4-8K, so we need headroom
-				// for the final summary (~3K tokens).
-				const maxTokens = Math.max(16384, Math.floor(settings.reserveTokens * 0.5));
-
-				// Last 3 turns: remove tools to force text-only summary output.
-				// Without this, the model keeps finding "one more thing" to do.
-				const turnsLeft = maxTurns - turn;
-				const turnTools = turnsLeft <= 3 ? [] : toolDefs;
+				const maxTokens = 32768;
 
 				const response = await completeSimple(
 					model,
-					{ systemPrompt, messages, tools: turnTools },
+					{ systemPrompt, messages, tools: toolDefs },
 					{ apiKey, maxTokens, signal, reasoning: "high" },
 				);
 
