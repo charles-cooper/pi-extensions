@@ -131,9 +131,12 @@ export default function (pi: ExtensionAPI) {
 			: "";
 
 		// System prompt for the compaction agent
-		const systemPrompt = `You are a handoff agent. Read the skills you're given, follow their instructions using the provided tools, then output a final text summary with NO tool calls. The summary replaces the conversation history — it must contain everything needed to continue.
+		const systemPrompt = `You are a handoff agent. Run /remember and /handoff skills using tools, then produce a summary as your final response (text only, no tool calls).
 
-IMPORTANT: When you are done with all tool calls, you MUST respond with ONLY text (no tool calls) containing your summary. This text-only response is how the system knows you are finished.`;
+Your summary becomes the initial prompt for the next session. It should:
+- Tell the next session where to load context from (skill files, handoff files, topic files, etc.)
+- Include full context for the current task(s): goal, progress, blockers, next steps
+- Include breadcrumbs (file paths, commands) so the next session can reconstruct state without loading everything upfront`;
 
 		let messages: Message[] = [
 			...llmMessages,
