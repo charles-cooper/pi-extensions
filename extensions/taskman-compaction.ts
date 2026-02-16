@@ -52,7 +52,6 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_compact", async (event, ctx) => {
 		if (continueMessageSent) return;
 		continueMessageSent = true;
-		if (ctx.hasPendingMessages()) return;
 		pi.sendMessage(
 			{
 				customType: "compaction_continue",
