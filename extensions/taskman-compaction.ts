@@ -69,9 +69,9 @@ export default function (pi: ExtensionAPI) {
 		const { messagesToSummarize, turnPrefixMessages, tokensBefore, firstKeptEntryId, previousSummary, fileOps, settings } = preparation;
 
 		// Warn if reserveTokens is too low for multi-turn agent loop
-		if (settings.reserveTokens < 50000) {
+		if (settings.reserveTokens < 25000) {
 			ctx.ui.notify(
-				`reserveTokens is ${settings.reserveTokens} (recommend ≥50000 for taskman compaction). Add {"compaction":{"reserveTokens":50000}} to settings.jsonl`,
+				`reserveTokens is ${settings.reserveTokens} (recommend ≥25000 for taskman compaction). Add {"compaction":{"reserveTokens":25000}} to settings.jsonl`,
 				"warning"
 			);
 		}
