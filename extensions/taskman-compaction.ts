@@ -35,7 +35,7 @@ const HANDOFF_REQUEST = `Context is getting long. Your task:
 
 1. Read the /remember skill from ${REMEMBER_SKILL_PATH} and persist any reusable knowledge (learnings, patterns, decisions) to topics/memory files.
 2. Read the /handoff skill from ${HANDOFF_SKILL_PATH} and follow its instructions to save current state.
-3. Produce a final summary (text only, no tool calls) that will become the initial prompt for the next session.
+3. Produce a final summary (text only, no tool calls) that will become the initial prompt for the next session. Preserve all user intent from this and previous sessions — goals, preferences, constraints, corrections — and use judgment as to how to frame it. Make sure to phrase it in a way which is preserved across automated handoffs.
 
 You can batch multiple tool calls.`;
 
@@ -134,10 +134,14 @@ export default function (pi: ExtensionAPI) {
 		// System prompt for the compaction agent
 		const systemPrompt = `You are a handoff agent. Run /remember and /handoff skills using tools, then produce a summary as your final response (text only, no tool calls).
 
-Your summary becomes the initial prompt for the next session. It should:
-- Tell the next session where to load context from (skill files, handoff files, topic files, etc.)
-- Include full context for the current task(s): goal, progress, blockers, next steps
-- Include breadcrumbs (file paths, commands) so the next session can reconstruct state without loading everything upfront`;
+Your summary becomes the initial prompt for the next session. If that session compacts, your summary is all that survives.
+
+Preserve all user intent from this and previous sessions — goals, preferences, constraints, corrections — and use judgment as to how to frame it. Make sure to phrase it in a way which is preserved across automated handoffs.
+
+Also include:
+- What technical progress was made and what remains
+- Where to load context from (skill files, handoff files, topic files)
+- Breadcrumbs (file paths, commands) to reconstruct state`;
 
 		let messages: Message[] = [
 			...llmMessages,
