@@ -55,9 +55,17 @@ export default function (pi: ExtensionAPI) {
 	// tool batch) and triggers compaction early via ctx.compact(), which
 	// internally aborts the agent loop then runs our session_before_compact.
 	let midTurnCompactPending = false;
+	const settingsPath = path.join(os.homedir(), ".pi/agent/settings.json");
+	function isCompactionEnabled(): boolean {
+		try {
+			const settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
+			return settings?.compaction?.enabled !== false;
+		} catch { return true; } // default: enabled
+	}
+
 	pi.on("turn_end", (event, ctx) => {
 		if (midTurnCompactPending) return;
-		// Only check mid-turn — skip if agent is idle (shouldn't happen in turn_end, but guard)
+		if (!isCompactionEnabled()) return;
 		if (ctx.isIdle()) return;
 
 		const usage = ctx.getContextUsage();
