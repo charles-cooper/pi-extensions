@@ -136,14 +136,42 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		// Combine messages and convert to LLM format
-		const allMessages = [...messagesToSummarize, ...turnPrefixMessages];
+		// Combine messages and convert to LLM format.
+		// Framework bug workaround: findCutPoint with keepRecentTokens:0 produces empty
+		// messagesToSummarize when the last entry is a toolResult (not a valid cut point).
+		// Since we set firstKeptEntryId:null (keep nothing), we need ALL messages after
+		// the last compaction. Extract from branchEntries as fallback.
+		let allMessages = [...messagesToSummarize, ...turnPrefixMessages];
+		if (allMessages.length === 0) {
+			const { branchEntries } = event;
+			const lastCompactIdx = branchEntries.findLastIndex((e: any) => e.type === "compaction");
+			const startIdx = lastCompactIdx >= 0 ? lastCompactIdx + 1 : 0;
+			for (let i = startIdx; i < branchEntries.length; i++) {
+				const entry = branchEntries[i] as any;
+				if (entry.type === "message") {
+					allMessages.push(entry.message);
+				} else if (entry.type === "custom_message") {
+					allMessages.push({
+						role: "custom",
+						content: entry.content,
+						timestamp: entry.timestamp ?? Date.now(),
+					});
+				}
+			}
+		}
 		const llmMessages = convertToLlm(allMessages);
 
-		// If there are no messages to summarize, fall back to default compaction
+		// If still no messages (e.g., immediate re-compaction with <3 entries),
+		// return previous summary with clean context instead of falling through to default
 		if (llmMessages.length === 0) {
-			ctx.ui.notify("No messages to summarize, using default compaction", "info");
-			return;
+			return {
+				compaction: {
+					summary: previousSummary || "/taskman continue",
+					firstKeptEntryId: null as any,
+					tokensBefore,
+					details: {},
+				},
+			};
 		}
 
 		ctx.ui.notify(`Taskman compaction: ${allMessages.length} messages...`, "info");
