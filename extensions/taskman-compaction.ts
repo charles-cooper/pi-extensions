@@ -37,6 +37,8 @@ const HANDOFF_REQUEST = `Context is getting long. Your task:
 2. Read the /handoff skill from ${HANDOFF_SKILL_PATH} and follow its instructions to save current state.
 3. Produce a final summary (text only, no tool calls) that will become the initial prompt for the next session. Preserve all user intent from this and previous sessions — goals, preferences, constraints, corrections — and use judgment as to how to frame it. Make sure to phrase it in a way which is preserved across automated handoffs.
 
+IMPORTANT: Do NOT take any action besides updating memory/handoff files. Do NOT modify source code, run commands, or make any changes to the project itself.
+
 You can batch multiple tool calls.`;
 
 function checkTaskmanAvailable(): boolean {
@@ -267,7 +269,7 @@ Also include:
 			return {
 				compaction: {
 					summary,
-					firstKeptEntryId,
+					firstKeptEntryId: null as any, // Keep ZERO old messages — clean slate after compaction
 					tokensBefore,
 					details: { readFiles, modifiedFiles },
 				},
@@ -282,7 +284,7 @@ Also include:
 			return {
 				compaction: {
 					summary: "/taskman continue",
-					firstKeptEntryId,
+					firstKeptEntryId: null as any, // Keep ZERO old messages — clean slate after compaction
 					tokensBefore,
 					details: {},
 				},
