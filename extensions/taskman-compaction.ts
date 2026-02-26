@@ -46,6 +46,43 @@ function checkTaskmanAvailable(): boolean {
 }
 
 export default function (pi: ExtensionAPI) {
+	// =========================================================================
+	// Mid-turn compaction check
+	// =========================================================================
+	// Framework only checks shouldCompact at agent_end (after entire turn).
+	// During long tool-use turns (100+ tool calls), context grows past threshold
+	// unchecked. This handler checks at each turn_end (after each LLM call +
+	// tool batch) and triggers compaction early via ctx.compact(), which
+	// internally aborts the agent loop then runs our session_before_compact.
+	let midTurnCompactPending = false;
+	pi.on("turn_end", (event, ctx) => {
+		if (midTurnCompactPending) return;
+		// Only check mid-turn — skip if agent is idle (shouldn't happen in turn_end, but guard)
+		if (ctx.isIdle()) return;
+
+		const usage = ctx.getContextUsage();
+		if (!usage || usage.tokens === null || usage.percent === null) return;
+
+		// Threshold: 80% of context window.
+		// For 200K window + 40K reserve = 160K threshold = 80%.
+		// Framework's shouldCompact uses reserveTokens from settings, but that's
+		// not exposed to extensions. 80% is conservative enough for most configs.
+		if (usage.percent > 80) {
+			midTurnCompactPending = true;
+			ctx.ui.notify(
+				`Context at ${Math.round(usage.percent)}% mid-turn, triggering compaction`,
+				"info"
+			);
+			ctx.compact({
+				onComplete: () => { midTurnCompactPending = false; },
+				onError: () => { midTurnCompactPending = false; },
+			});
+		}
+	});
+
+	// =========================================================================
+	// Post-compaction continue message
+	// =========================================================================
 	// Track if we've already sent the continue message for this compaction
 	// After compaction, auto-continue so the agent acts on the summary.
 	// For overflow: framework also calls agent.continue() at 100ms — ours wins (starts first),
@@ -53,6 +90,7 @@ export default function (pi: ExtensionAPI) {
 	// For queued messages: skip — framework's continue() handles delivery.
 	let continueMessageSent = false;
 	pi.on("session_compact", async (event, ctx) => {
+		midTurnCompactPending = false; // Reset guard after any compaction
 		if (continueMessageSent) return;
 		continueMessageSent = true;
 		pi.sendMessage(
