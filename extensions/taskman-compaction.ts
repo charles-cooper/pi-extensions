@@ -61,16 +61,17 @@ export default function (pi: ExtensionAPI) {
 		if (ctx.isIdle()) return;
 
 		const usage = ctx.getContextUsage();
-		if (!usage || usage.tokens === null || usage.percent === null) return;
+		if (!usage || usage.tokens === null) return;
 
-		// Threshold: 80% of context window.
-		// For 200K window + 40K reserve = 160K threshold = 80%.
-		// Framework's shouldCompact uses reserveTokens from settings, but that's
-		// not exposed to extensions. 80% is conservative enough for most configs.
-		if (usage.percent > 80) {
+		// Hard token threshold rather than percentage — works across context window sizes
+		// (200K and 1M Opus variants). Framework's shouldCompact uses reserveTokens from
+		// settings (not exposed to extensions). 160K matches 200K window with 40K reserve.
+		// Future: could be per-model or read from settings if needed.
+		const MID_TURN_COMPACT_THRESHOLD = 160_000;
+		if (usage.tokens > MID_TURN_COMPACT_THRESHOLD) {
 			midTurnCompactPending = true;
 			ctx.ui.notify(
-				`Context at ${Math.round(usage.percent)}% mid-turn, triggering compaction`,
+				`Context at ${Math.round(usage.tokens / 1000)}K tokens mid-turn, triggering compaction`,
 				"info"
 			);
 			ctx.compact({
