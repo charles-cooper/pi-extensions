@@ -519,7 +519,7 @@ async function runSubagent(
 	const args = ["--mode", "json", "-p", "--no-session", "--model", model];
 
 	// Let the subagent know it's a subagent to discourage recursive spawning
-	args.push("--append-system-prompt", "You are a subagent. You can spawn further subagents if truly needed, but prefer to complete tasks directly.");
+	args.push("--append-system-prompt", "You are a subagent. Complete your task directly.");
 
 	if (tools && tools.length > 0) {
 		// Tool names are case-sensitive (lowercase)
@@ -553,7 +553,7 @@ async function runSubagent(
 			cwd,
 			shell: false,
 			stdio: ["ignore", "pipe", "pipe"],
-			env: { ...process.env, FORCE_COLOR: "0", NO_COLOR: "1" },
+			env: { ...process.env, FORCE_COLOR: "0", NO_COLOR: "1", PI_SUBAGENT: "1" },
 		});
 		let buffer = "";
 		let stderr = "";
@@ -679,6 +679,8 @@ async function runSubagent(
 }
 
 export default function (pi: ExtensionAPI) {
+	// Subagents cannot spawn further subagents - skip tool registration
+	if (process.env.PI_SUBAGENT === "1") return;
 	// Track cumulative subagent usage across the session
 	let cumulativeUsage: UsageStats = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
 
