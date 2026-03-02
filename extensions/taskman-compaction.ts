@@ -351,7 +351,7 @@ Also include:
 			};
 		} catch (error) {
 			ctx.ui.setStatus("compaction", undefined);
-			if (signal.aborted) return;
+			if (signal.aborted) return { cancel: true };
 			const message = error instanceof Error ? error.message : String(error);
 			ctx.ui.notify(`Taskman compaction failed: ${message}`, "error");
 
