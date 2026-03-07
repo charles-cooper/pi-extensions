@@ -1103,7 +1103,7 @@ export default function (pi: ExtensionAPI) {
 		name: "subagents",
 		label: "Subagents (parallel)",
 		description:
-			`Spawn multiple subagents in parallel. Each task runs concurrently with isolated context.\n\n${modelListXml}`,
+			`Spawn multiple subagents in parallel. Each task runs concurrently with isolated context. Same models as subagent tool.`,
 		parameters: Type.Object({
 			tasks: Type.Array(TaskItem, { description: `Array of tasks for parallel execution (max ${MAX_PARALLEL})`, minItems: 1 }),
 		}),
