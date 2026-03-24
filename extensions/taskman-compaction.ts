@@ -205,7 +205,7 @@ export default function (pi: ExtensionAPI) {
 			: "";
 
 		const customContext = customInstructions
-			? `\n\nUser instructions for this compaction:\n${customInstructions}`
+			? `\n\nUser instructions for next session:\n${customInstructions}`
 			: "";
 
 		// System prompt for the compaction agent
