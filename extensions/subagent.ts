@@ -17,7 +17,7 @@ import type { Message } from "@mariozechner/pi-ai";
 import { Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 
-const MAX_PARALLEL = 8;
+const MAX_PARALLEL = 32;
 
 /** Custom entry type for persisting subagent usage */
 const SUBAGENT_USAGE_ENTRY_TYPE = "subagent_usage";
