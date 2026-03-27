@@ -139,11 +139,13 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify("No model available for compaction, using default", "warning");
 			return;
 		}
-		const apiKey = await ctx.modelRegistry.getApiKey(model);
-		if (!apiKey) {
+		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+		if (!auth.ok) {
 			ctx.ui.notify(`No API key for ${model.provider}/${model.id}, using default compaction`, "warning");
 			return;
 		}
+		const apiKey = auth.apiKey;
+		const headers = auth.headers;
 
 		// Combine messages and convert to LLM format.
 		// Framework bug workaround: findCutPoint with keepRecentTokens:0 produces empty
@@ -246,7 +248,7 @@ Also include:
 				const response = await completeSimple(
 					model,
 					{ systemPrompt, messages, tools: toolDefs },
-					{ apiKey, maxTokens, signal, reasoning: "high" },
+					{ apiKey, headers, maxTokens, signal, reasoning: "high" },
 				);
 
 				// Bail on errored/aborted responses before executing any tool calls
