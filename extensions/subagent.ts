@@ -12,6 +12,25 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+
+/**
+ * Resolve the pi binary invocation, bypassing shell wrappers (e.g., sandbox).
+ * Uses the same Node.js runtime and script that launched the current process.
+ */
+function getPiInvocation(args: string[]): { command: string; args: string[] } {
+	const currentScript = process.argv[1];
+	if (currentScript && fs.existsSync(currentScript)) {
+		return { command: process.execPath, args: [currentScript, ...args] };
+	}
+
+	const execName = path.basename(process.execPath).toLowerCase();
+	const isGenericRuntime = /^(node|bun)(\.exe)?$/.test(execName);
+	if (!isGenericRuntime) {
+		return { command: process.execPath, args };
+	}
+
+	return { command: "pi", args };
+}
 import { type ExtensionAPI, type ExtensionContext, getMarkdownTheme, getLanguageFromPath, highlightCode } from "@mariozechner/pi-coding-agent";
 import type { Message } from "@mariozechner/pi-ai";
 import { Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
@@ -549,7 +568,8 @@ async function runSubagent(
 	let wasAborted = false;
 
 	const exitCode = await new Promise<number>((resolve) => {
-		const proc = spawn("pi", args, {
+		const invocation = getPiInvocation(args);
+		const proc = spawn(invocation.command, invocation.args, {
 			cwd,
 			shell: false,
 			stdio: ["ignore", "pipe", "pipe"],
