@@ -170,11 +170,18 @@ Add to `~/.pi/settings.jsonl`:
 {"extensions": ["~/pi-extensions/extensions/taskman-compaction.ts"]}
 ```
 
-### Earlier compaction
+### Settings
 
-Default compaction triggers at ~92% context. To trigger earlier (~70%):
+All settings go in `~/.pi/agent/settings.json` (global) or `.pi/settings.json` (project).
+
+**Earlier compaction** — default triggers at ~92% context. To trigger earlier (~70%):
 ```json
 {"compaction": {"reserveTokens": 60000}}
+```
+
+**Mid-turn compaction threshold** — during long tool-use turns, the framework only checks context size after the entire turn. This extension also checks after each LLM call and triggers compaction early when tokens exceed the threshold. Default is 160K (matches 200K context window with 40K reserve):
+```json
+{"compaction": {"midTurnTokenThreshold": 160000}}
 ```
 
 ### Requirements
