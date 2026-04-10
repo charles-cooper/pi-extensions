@@ -17,6 +17,9 @@
  *
  * Recommended settings (triggers compaction earlier, required for context budget):
  *   {"compaction": {"reserveTokens": 50000}}
+ *
+ * Optional: override mid-turn compaction threshold (default 160K tokens):
+ *   {"compaction": {"midTurnTokenThreshold": 160000}}
  */
 
 import * as fs from "node:fs";
@@ -56,16 +59,22 @@ export default function (pi: ExtensionAPI) {
 	// internally aborts the agent loop then runs our session_before_compact.
 	let midTurnCompactPending = false;
 	const settingsPath = path.join(os.homedir(), ".pi/agent/settings.json");
-	function isCompactionEnabled(): boolean {
+	function readCompactionSettings(): { enabled: boolean; midTurnTokenThreshold: number } {
 		try {
 			const settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
-			return settings?.compaction?.enabled !== false;
-		} catch { return true; } // default: enabled
+			return {
+				enabled: settings?.compaction?.enabled !== false,
+				midTurnTokenThreshold: settings?.compaction?.midTurnTokenThreshold ?? 160_000,
+			};
+		} catch {
+			return { enabled: true, midTurnTokenThreshold: 160_000 };
+		}
 	}
 
 	pi.on("turn_end", (event, ctx) => {
 		if (midTurnCompactPending) return;
-		if (!isCompactionEnabled()) return;
+		const compactionSettings = readCompactionSettings();
+		if (!compactionSettings.enabled) return;
 		if (ctx.isIdle()) return;
 
 		const usage = ctx.getContextUsage();
@@ -73,10 +82,9 @@ export default function (pi: ExtensionAPI) {
 
 		// Hard token threshold rather than percentage — works across context window sizes
 		// (200K and 1M Opus variants). Framework's shouldCompact uses reserveTokens from
-		// settings (not exposed to extensions). 160K matches 200K window with 40K reserve.
-		// Future: could be per-model or read from settings if needed.
-		const MID_TURN_COMPACT_THRESHOLD = 160_000;
-		if (usage.tokens > MID_TURN_COMPACT_THRESHOLD) {
+		// settings (not exposed to extensions). Default 160K matches 200K window with 40K reserve.
+		// Configurable via compaction.midTurnTokenThreshold in settings.json.
+		if (usage.tokens > compactionSettings.midTurnTokenThreshold) {
 			midTurnCompactPending = true;
 			ctx.ui.notify(
 				`Context at ${Math.round(usage.tokens / 1000)}K tokens mid-turn, triggering compaction`,
