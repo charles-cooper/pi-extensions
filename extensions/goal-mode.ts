@@ -7,11 +7,10 @@
  * - `/goal pause|resume|clear` — lifecycle
  * - LLM tools: `get_goal`, `create_goal`, `update_goal` (complete only)
  *
- * Continuation: when an active goal's agent cycle ends after a productive
- * turn (had tool calls), a user message is injected to keep the agent working.
- * After a text-only (idle) turn, continuation is suppressed until the user
- * interacts or a tool call fires. This mirrors Codex's
- * "no counted autonomous activity" guard.
+ * Continuation: while a goal is active, agent_end injects a user message
+ * to keep the agent working. Continuation stops only when the goal status
+ * changes (complete/paused/budget_limited) — via update_goal tool or
+ * /goal command. The user can always `/goal pause` to stop the loop.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
@@ -33,7 +32,6 @@ interface Goal {
 }
 
 const ENTRY_TYPE = "goal_mode";
-const MAX_IDLE_CONTINUATIONS = 3;
 
 // ── Formatters ──
 
@@ -131,13 +129,6 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 	let goal: Goal | null = null;
 	let budgetLimitReported = false;
 
-	// Continuation state — tracks whether the agent is making progress.
-	// productiveTurn (had tool calls) → allow continuation.
-	// idle turn (text-only) → suppress, increment counter.
-	// After N idle turns, stop trying and notify the user.
-	let consecutiveIdleTurns = 0;
-	let turnHadToolCalls = false;
-
 	// ── Goal persistence ──
 
 	function saveGoal(ctx: ExtensionContext) {
@@ -150,8 +141,8 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 		for (const entry of ctx.sessionManager.getEntries()) {
 			if (entry.type === "custom" && entry.customType === ENTRY_TYPE) {
 				const d = entry.data as Partial<Goal> | undefined;
-				if (d?.id) goal = d as Goal;
 				if (d?.cleared) goal = null;
+				else if (d?.id) goal = d as Goal;
 			}
 		}
 		if (goal?.status === "active") goal.lastAccountedMs = Date.now();
@@ -164,9 +155,7 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 		if (goal && goal.status !== "complete") {
 			const elapsed = formatElapsed(Date.now() - goal.timeStartedMs);
 			let s = `${STATUS_ICON[goal.status]} goal: ${STATUS_LABEL[goal.status]} (${elapsed})`;
-			if (goal.tokenBudget) {
-				s += ` | ${formatTokens(goal.tokensUsed)}/${formatTokens(goal.tokenBudget)} tok`;
-			}
+			if (goal.tokenBudget) s += ` | ${formatTokens(goal.tokensUsed)}/${formatTokens(goal.tokenBudget)} tok`;
 			ctx.ui.setStatus("goal", s);
 		} else {
 			ctx.ui.setStatus("goal", undefined);
@@ -177,12 +166,9 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 
 	function accountTokens(ctx: ExtensionContext) {
 		if (!goal || goal.status !== "active") return;
-
 		const tokens = ctx.getContextUsage()?.tokens ?? 0;
-		const now = Date.now();
 		goal.tokensUsed = Math.max(goal.tokensUsed, tokens > 0 ? tokens : goal.tokensUsed);
-		goal.lastAccountedMs = now;
-
+		goal.lastAccountedMs = Date.now();
 		if (goal.tokenBudget && goal.tokensUsed >= goal.tokenBudget) {
 			goal.status = "budget_limited";
 			budgetLimitReported = false;
@@ -197,23 +183,15 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 		const trimmed = objective.trim();
 		if (!trimmed) { ctx.ui.notify("Objective cannot be empty", "error"); return; }
 		if (trimmed.length > 500) { ctx.ui.notify("Objective too long (max 500 chars)", "error"); return; }
-
 		const now = Date.now();
-		goal = {
-			id: generateId(), objective: trimmed, status: "active",
-			tokenBudget, tokensUsed: 0, timeStartedMs: now, lastAccountedMs: now,
-		};
+		goal = { id: generateId(), objective: trimmed, status: "active", tokenBudget, tokensUsed: 0, timeStartedMs: now, lastAccountedMs: now };
 		budgetLimitReported = false;
-		consecutiveIdleTurns = 0;
-		saveGoal(ctx);
-		updateStatus(ctx);
+		saveGoal(ctx); updateStatus(ctx);
 		ctx.ui.notify(`Goal active${tokenBudget ? ` (budget: ${formatTokens(tokenBudget)} tok)` : ""}: ${trimmed}`, "info");
 	}
 
 	function pauseGoal(ctx: ExtensionContext) {
-		if (!goal || goal.status !== "active") {
-			ctx.ui.notify("No active goal to pause", "warning"); return;
-		}
+		if (!goal || goal.status !== "active") { ctx.ui.notify("No active goal to pause", "warning"); return; }
 		accountTokens(ctx);
 		goal.status = "paused";
 		saveGoal(ctx); updateStatus(ctx);
@@ -221,12 +199,9 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 	}
 
 	function resumeGoal(ctx: ExtensionContext) {
-		if (!goal || goal.status !== "paused") {
-			ctx.ui.notify("No paused goal to resume", "warning"); return;
-		}
+		if (!goal || goal.status !== "paused") { ctx.ui.notify("No paused goal to resume", "warning"); return; }
 		goal.status = "active";
 		goal.lastAccountedMs = Date.now();
-		consecutiveIdleTurns = 0;
 		saveGoal(ctx); updateStatus(ctx);
 		ctx.ui.notify(`Goal resumed: ${goal.objective}`, "info");
 	}
@@ -236,7 +211,6 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 		const id = goal.id;
 		goal = null;
 		budgetLimitReported = false;
-		consecutiveIdleTurns = 0;
 		pi.appendEntry(ENTRY_TYPE, { cleared: true, clearedGoalId: id });
 		updateStatus(ctx);
 		ctx.ui.notify("Goal cleared", "info");
@@ -246,7 +220,6 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 		if (!goal) return;
 		accountTokens(ctx);
 		goal.status = "complete";
-		consecutiveIdleTurns = 0;
 		saveGoal(ctx); updateStatus(ctx);
 		const elapsed = formatElapsed(Date.now() - goal.timeStartedMs);
 		let msg = `Goal complete: ${goal.objective}\nTime: ${elapsed}`;
@@ -254,66 +227,27 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 		ctx.ui.notify(msg, "info");
 	}
 
-	// ── Event: session lifecycle ──
+	// ── Events ──
 
-	pi.on("session_start", (_event, ctx) => {
-		restoreGoal(ctx);
-		consecutiveIdleTurns = 0;
-	});
+	pi.on("session_start", (_event, ctx) => { restoreGoal(ctx); });
 
 	pi.on("session_compact", (_event, ctx) => {
-		// Re-emit: compaction drops entries before firstKeptEntryId
 		if (goal && goal.status !== "complete") saveGoal(ctx);
-	});
-
-	// ── Event: continuation tracking ──
-
-	pi.on("turn_start", () => { turnHadToolCalls = false; });
-
-	pi.on("tool_call", () => {
-		turnHadToolCalls = true;
-		// Productive activity resets idle counter (Codex: "user/tool/external activity resets it")
-		consecutiveIdleTurns = 0;
 	});
 
 	pi.on("turn_end", (_event, ctx) => {
 		if (!goal || goal.status !== "active") return;
-
 		accountTokens(ctx);
-
-		// Budget limit reached → steer agent to wrap up
 		if (goal.status === "budget_limited" && !budgetLimitReported) {
 			budgetLimitReported = true;
 			pi.sendUserMessage(buildBudgetLimitPrompt(goal), { deliverAs: "steer" });
-			return;
 		}
-
-		// Track idle turns (text-only, no tool calls)
-		if (!turnHadToolCalls) consecutiveIdleTurns++;
 	});
 
-	pi.on("agent_end", (_event, ctx) => {
+	pi.on("agent_end", () => {
 		if (!goal || goal.status !== "active") return;
-
-		// Don't continue if the agent isn't making progress
-		if (consecutiveIdleTurns >= MAX_IDLE_CONTINUATIONS) {
-			ctx.ui.notify(
-				`Goal active but no progress for ${consecutiveIdleTurns} turns. Use /goal pause or send a message to continue.`,
-				"warning",
-			);
-			return;
-		}
-
-		// Send continuation as a real user message — the model acts on these.
-		// sendMessage with deliverAs arrives as a system-ish message that the
-		// model just acknowledges in text. Codex injects continuation as a
-		// developer message inside the turn loop; sendUserMessage is the
-		// closest pi equivalent.
 		pi.sendUserMessage(buildContinuationPrompt(goal), { deliverAs: "steer" });
 	});
-
-	// User input resets idle counter
-	pi.on("input", () => { consecutiveIdleTurns = 0; });
 
 	// ── Tool: get_goal ──
 
@@ -409,7 +343,7 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 			if (params.status !== "complete") throw new Error("update_goal can only mark goals complete; pause/resume are controlled by the user via /goal");
 			completeGoal(ctx);
 			const g = goalSnapshot();
-			const report = g.tokenBudget
+			const report = g?.tokenBudget
 				? `Goal achieved. Report final budget usage to the user: tokens used: ${g.tokensUsed} of ${g.tokenBudget}; time used: ${g.timeElapsed}.`
 				: undefined;
 			return { content: [{ type: "text", text: JSON.stringify({ ...g, completionBudgetReport: report }, null, 2) }], details: { goal: g, completionReport: report } };
@@ -452,13 +386,10 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 			if (sub === "pause") return pauseGoal(ctx);
 			if (sub === "resume") return resumeGoal(ctx);
 			if (sub === "clear") return clearGoal(ctx);
-
 			if (sub === "budget") return handleBudgetCommand(parts, ctx);
 
-			// Default: entire args is the objective
 			const objective = args.trim();
 			if (!objective) { ctx.ui.notify("Usage: /goal <objective>", "info"); return; }
-
 			if (goal?.status === "active") {
 				if (!await ctx.ui.confirm("Replace current goal?", `Current: ${goal.objective}\nNew: ${objective}`)) return;
 			}
@@ -467,7 +398,7 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 		},
 	});
 
-	// ── Helpers for /goal command ──
+	// ── Command helpers ──
 
 	function showGoalSummary(ctx: ExtensionContext) {
 		if (!goal) { ctx.ui.notify("No goal set. Usage: /goal <objective>", "info"); return; }
@@ -485,7 +416,6 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 			if (goal.status === "budget_limited") {
 				goal.status = "active";
 				goal.lastAccountedMs = Date.now();
-				consecutiveIdleTurns = 0;
 			}
 			saveGoal(ctx); updateStatus(ctx);
 			ctx.ui.notify("Budget removed (unlimited tokens)", "info");
