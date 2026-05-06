@@ -130,6 +130,7 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 	let budgetLimitReported = false;
 	let debugEnabled = process.env.PI_GOAL_DEBUG === "1";
 	const recentEvents: string[] = [];
+	let pendingSend: ReturnType<typeof setTimeout> | undefined;
 
 	function trace(event: string) {
 		const status = goal?.status ?? "none";
@@ -139,14 +140,38 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 		if (debugEnabled) console.log(`[goal-mode] ${line}`);
 	}
 
-	function sendUserTurn(prompt: string, ctx: ExtensionContext, event: string) {
-		trace(`${event}:send idle=${ctx.isIdle()}`);
+	function sendUserTurn(
+		prompt: string,
+		ctx: ExtensionContext,
+		event: string,
+		shouldSend: () => boolean,
+		attempt = 0,
+	) {
+		if (attempt === 0 && pendingSend) {
+			trace(`${event}:already-pending`);
+			return;
+		}
+		if (attempt > 0) pendingSend = undefined;
+		if (!shouldSend()) {
+			trace(`${event}:cancelled`);
+			return;
+		}
+		trace(`${event}:send-attempt attempt=${attempt} idle=${ctx.isIdle()}`);
+		if (!ctx.isIdle()) {
+			pendingSend = setTimeout(() => sendUserTurn(prompt, ctx, event, shouldSend, attempt + 1), 100);
+			return;
+		}
 		try {
-			if (ctx.isIdle()) pi.sendUserMessage(prompt);
-			else pi.sendUserMessage(prompt, { deliverAs: "followUp" });
+			pi.sendUserMessage(prompt);
+			trace(`${event}:sent`);
 		} catch (error) {
-			trace(`${event}:send-error ${error instanceof Error ? error.message : String(error)}`);
-			ctx.ui.notify(`goal-mode failed to send continuation: ${error instanceof Error ? error.message : String(error)}`, "warning");
+			const message = error instanceof Error ? error.message : String(error);
+			trace(`${event}:send-error ${message}`);
+			if (attempt < 20 && message.includes("already processing")) {
+				pendingSend = setTimeout(() => sendUserTurn(prompt, ctx, event, shouldSend, attempt + 1), 100);
+				return;
+			}
+			ctx.ui.notify(`goal-mode failed to send continuation: ${message}`, "warning");
 		}
 	}
 
@@ -263,14 +288,14 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 		accountTokens(ctx);
 		if (goal.status === "budget_limited" && !budgetLimitReported) {
 			budgetLimitReported = true;
-			sendUserTurn(buildBudgetLimitPrompt(goal), ctx, "budget_limit");
+			sendUserTurn(buildBudgetLimitPrompt(goal), ctx, "budget_limit", () => goal?.status === "budget_limited");
 		}
 	});
 
 	pi.on("agent_end", (_event, ctx) => {
 		if (!goal || goal.status !== "active") return;
 		trace("agent_end");
-		sendUserTurn(buildContinuationPrompt(goal), ctx, "continuation");
+		sendUserTurn(buildContinuationPrompt(goal), ctx, "continuation", () => goal?.status === "active");
 	});
 
 	// ── Tool: get_goal ──
