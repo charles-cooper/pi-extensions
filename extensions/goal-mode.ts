@@ -364,11 +364,14 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 		// If goal just hit budget limit, send budget steering message
 		if ((goal.status as string) === "budget_limited" && !budgetLimitReported) {
 			budgetLimitReported = true;
+			// Use deliverAs: "steer" — turn_end fires mid-loop so agent may
+			// still be processing. steer queues safely; triggerTurn starts
+			// a new LLM call once the current turn finishes.
 			pi.sendMessage({
 				customType: "goal_budget_limited",
 				content: buildBudgetLimitPrompt(goal),
 				display: false,
-			}, { triggerTurn: true });
+			}, { deliverAs: "steer", triggerTurn: true });
 			return;
 		}
 
@@ -382,13 +385,14 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 		if (!goal || goal.status !== "active") return;
 		if (continuationSent) return;
 
-		// Only send if the agent actually completed (not errored out)
 		continuationSent = true;
+		// Use deliverAs: "steer" — agent_end may fire while runtime still
+		// considers the agent "processing". steer queues safely.
 		pi.sendMessage({
 			customType: "goal_continuation",
 			content: buildContinuationPrompt(goal),
 			display: false,
-		}, { triggerTurn: true });
+		}, { deliverAs: "steer", triggerTurn: true });
 	});
 
 	// ── Tools ──
