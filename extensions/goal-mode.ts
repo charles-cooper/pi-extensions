@@ -297,7 +297,6 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 		goal.status = "paused";
 		saveGoal(ctx); updateStatus(ctx);
 		cancelPendingContinuation(reason);
-		ctx.ui.notify(`Goal paused due to interrupt. Use /goal resume to continue.`, "info");
 	}
 
 	function completeGoal(ctx: ExtensionContext) {
