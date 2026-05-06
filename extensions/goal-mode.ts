@@ -376,6 +376,15 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 		resetContinuationState();
 	});
 
+	// Re-emit goal after compaction so it survives in the kept entries.
+	// appendEntry entries before firstKeptEntryId are dropped by compaction.
+	// Re-emitting puts the current goal state into the post-compaction range.
+	pi.on("session_compact", (_event, ctx) => {
+		if (goal && goal.status !== "complete") {
+			saveGoal(goal, ctx);
+		}
+	});
+
 	// Track tool calls per turn — resets at turn start, set on tool_call
 	pi.on("turn_start", (_event, _ctx) => {
 		lastTurnHadToolCalls = false;
