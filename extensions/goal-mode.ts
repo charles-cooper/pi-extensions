@@ -128,6 +128,27 @@ Do not call update_goal unless the goal is actually complete.`;
 export default function goalModeExtension(pi: ExtensionAPI) {
 	let goal: Goal | null = null;
 	let budgetLimitReported = false;
+	let debugEnabled = process.env.PI_GOAL_DEBUG === "1";
+	const recentEvents: string[] = [];
+
+	function trace(event: string) {
+		const status = goal?.status ?? "none";
+		const line = `${new Date().toISOString()} ${event} status=${status}`;
+		recentEvents.push(line);
+		while (recentEvents.length > 30) recentEvents.shift();
+		if (debugEnabled) console.log(`[goal-mode] ${line}`);
+	}
+
+	function sendUserTurn(prompt: string, ctx: ExtensionContext, event: string) {
+		trace(`${event}:send idle=${ctx.isIdle()}`);
+		try {
+			if (ctx.isIdle()) pi.sendUserMessage(prompt);
+			else pi.sendUserMessage(prompt, { deliverAs: "followUp" });
+		} catch (error) {
+			trace(`${event}:send-error ${error instanceof Error ? error.message : String(error)}`);
+			ctx.ui.notify(`goal-mode failed to send continuation: ${error instanceof Error ? error.message : String(error)}`, "warning");
+		}
+	}
 
 	// ── Goal persistence ──
 
@@ -229,24 +250,27 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 
 	// ── Events ──
 
-	pi.on("session_start", (_event, ctx) => { restoreGoal(ctx); });
+	pi.on("session_start", (_event, ctx) => { restoreGoal(ctx); trace("session_start"); });
 
 	pi.on("session_compact", (_event, ctx) => {
+		trace("session_compact");
 		if (goal && goal.status !== "complete") saveGoal(ctx);
 	});
 
 	pi.on("turn_end", (_event, ctx) => {
 		if (!goal || goal.status !== "active") return;
+		trace("turn_end");
 		accountTokens(ctx);
 		if (goal.status === "budget_limited" && !budgetLimitReported) {
 			budgetLimitReported = true;
-			pi.sendUserMessage(buildBudgetLimitPrompt(goal), { deliverAs: "steer" });
+			sendUserTurn(buildBudgetLimitPrompt(goal), ctx, "budget_limit");
 		}
 	});
 
-	pi.on("agent_end", () => {
+	pi.on("agent_end", (_event, ctx) => {
 		if (!goal || goal.status !== "active") return;
-		pi.sendUserMessage(buildContinuationPrompt(goal), { deliverAs: "steer" });
+		trace("agent_end");
+		sendUserTurn(buildContinuationPrompt(goal), ctx, "continuation");
 	});
 
 	// ── Tool: get_goal ──
@@ -366,10 +390,11 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 	// ── /goal command ──
 
 	pi.registerCommand("goal", {
-		description: "/goal <objective> | /goal status | /goal pause | /goal resume | /goal clear | /goal budget <N|off>",
+		description: "/goal <objective> | /goal status | /goal debug | /goal pause | /goal resume | /goal clear | /goal budget <N|off>",
 		getArgumentCompletions(prefix: string) {
 			const subs = [
 				{ value: "status", label: "status", description: "Show current goal" },
+				{ value: "debug", label: "debug", description: "Show recent goal-mode events" },
 				{ value: "pause", label: "pause", description: "Pause the active goal" },
 				{ value: "resume", label: "resume", description: "Resume the paused goal" },
 				{ value: "clear", label: "clear", description: "Clear the current goal" },
@@ -383,6 +408,7 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 			const sub = parts[0]?.toLowerCase();
 
 			if (!sub || sub === "status") return showGoalSummary(ctx);
+			if (sub === "debug") return showGoalDebug(ctx);
 			if (sub === "pause") return pauseGoal(ctx);
 			if (sub === "resume") return resumeGoal(ctx);
 			if (sub === "clear") return clearGoal(ctx);
@@ -406,6 +432,11 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 		let text = `Goal: ${goal.objective}\nStatus: ${STATUS_LABEL[goal.status]}\nTime: ${elapsed}\nTokens: ${formatTokens(goal.tokensUsed)}`;
 		if (goal.tokenBudget) text += ` / ${formatTokens(goal.tokenBudget)}`;
 		ctx.ui.notify(text, "info");
+	}
+
+	function showGoalDebug(ctx: ExtensionContext) {
+		debugEnabled = true;
+		ctx.ui.notify(recentEvents.length ? recentEvents.join("\n") : "No goal-mode events recorded yet", "info");
 	}
 
 	function handleBudgetCommand(parts: string[], ctx: ExtensionContext) {
