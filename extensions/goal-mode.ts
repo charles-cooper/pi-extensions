@@ -128,6 +128,7 @@ Do not call update_goal unless the goal is actually complete.`;
 export default function goalModeExtension(pi: ExtensionAPI) {
 	let goal: Goal | null = null;
 	let budgetLimitReported = false;
+	let compactionInProgress = false;
 	let debugEnabled = process.env.PI_GOAL_DEBUG === "1";
 	const recentEvents: string[] = [];
 	let pendingSend: ReturnType<typeof setTimeout> | undefined;
@@ -316,15 +317,21 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 
 	pi.on("session_start", (_event, ctx) => { restoreGoal(ctx); trace("session_start"); });
 
+	pi.on("session_before_compact", () => {
+		compactionInProgress = true;
+		trace("session_before_compact");
+	});
+
 	pi.on("session_compact", (_event, ctx) => {
 		trace("session_compact");
+		compactionInProgress = false;
 		if (goal && goal.status !== "complete") saveGoal(ctx);
 	});
 
 	pi.on("turn_end", (event, ctx) => {
 		if (!goal || goal.status !== "active") return;
 		trace("turn_end");
-		if (eventWasInterrupted(event)) {
+		if (eventWasInterrupted(event) && !compactionInProgress) {
 			pauseGoalForInterrupt(ctx, "turn-interrupted");
 			return;
 		}
@@ -338,7 +345,7 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 	pi.on("agent_end", (event, ctx) => {
 		if (!goal || goal.status !== "active") return;
 		trace("agent_end");
-		if (eventWasInterrupted(event)) {
+		if (eventWasInterrupted(event) && !compactionInProgress) {
 			pauseGoalForInterrupt(ctx, "agent-interrupted");
 			return;
 		}
