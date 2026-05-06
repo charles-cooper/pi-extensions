@@ -131,6 +131,7 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 	let debugEnabled = process.env.PI_GOAL_DEBUG === "1";
 	const recentEvents: string[] = [];
 	let pendingSend: ReturnType<typeof setTimeout> | undefined;
+	let suppressContinuationUntilUserInput = false;
 
 	function trace(event: string) {
 		const status = goal?.status ?? "none";
@@ -138,6 +139,31 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 		recentEvents.push(line);
 		while (recentEvents.length > 30) recentEvents.shift();
 		if (debugEnabled) console.log(`[goal-mode] ${line}`);
+	}
+
+	function cancelPendingContinuation(reason: string) {
+		if (pendingSend) {
+			clearTimeout(pendingSend);
+			pendingSend = undefined;
+		}
+		trace(`continuation:suppressed ${reason}`);
+	}
+
+	function eventWasInterrupted(event: unknown): boolean {
+		const stopReasons = collectStopReasons(event);
+		return stopReasons.some((reason) => /abort|interrupt|cancel/i.test(reason));
+	}
+
+	function collectStopReasons(value: unknown): string[] {
+		if (!value || typeof value !== "object") return [];
+		const input = value as Record<string, unknown>;
+		const reasons: string[] = [];
+		if (typeof input.stopReason === "string") reasons.push(input.stopReason);
+		if (Array.isArray(input.messages)) {
+			for (const message of input.messages) reasons.push(...collectStopReasons(message));
+		}
+		if (input.message) reasons.push(...collectStopReasons(input.message));
+		return reasons;
 	}
 
 	function sendUserTurn(
@@ -152,6 +178,10 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 			return;
 		}
 		if (attempt > 0) pendingSend = undefined;
+		if (suppressContinuationUntilUserInput) {
+			trace(`${event}:suppressed-until-user-input`);
+			return;
+		}
 		if (!shouldSend()) {
 			trace(`${event}:cancelled`);
 			return;
@@ -232,6 +262,7 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 		const now = Date.now();
 		goal = { id: generateId(), objective: trimmed, status: "active", tokenBudget, tokensUsed: 0, timeStartedMs: now, lastAccountedMs: now };
 		budgetLimitReported = false;
+		suppressContinuationUntilUserInput = false;
 		saveGoal(ctx); updateStatus(ctx);
 		ctx.ui.notify(`Goal active${tokenBudget ? ` (budget: ${formatTokens(tokenBudget)} tok)` : ""}: ${trimmed}`, "info");
 	}
@@ -248,6 +279,7 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 		if (!goal || goal.status !== "paused") { ctx.ui.notify("No paused goal to resume", "warning"); return; }
 		goal.status = "active";
 		goal.lastAccountedMs = Date.now();
+		suppressContinuationUntilUserInput = false;
 		saveGoal(ctx); updateStatus(ctx);
 		ctx.ui.notify(`Goal resumed: ${goal.objective}`, "info");
 	}
@@ -282,9 +314,14 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 		if (goal && goal.status !== "complete") saveGoal(ctx);
 	});
 
-	pi.on("turn_end", (_event, ctx) => {
+	pi.on("turn_end", (event, ctx) => {
 		if (!goal || goal.status !== "active") return;
 		trace("turn_end");
+		if (eventWasInterrupted(event)) {
+			suppressContinuationUntilUserInput = true;
+			cancelPendingContinuation("turn-interrupted");
+			return;
+		}
 		accountTokens(ctx);
 		if (goal.status === "budget_limited" && !budgetLimitReported) {
 			budgetLimitReported = true;
@@ -292,10 +329,21 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 		}
 	});
 
-	pi.on("agent_end", (_event, ctx) => {
+	pi.on("agent_end", (event, ctx) => {
 		if (!goal || goal.status !== "active") return;
 		trace("agent_end");
+		if (eventWasInterrupted(event)) {
+			suppressContinuationUntilUserInput = true;
+			cancelPendingContinuation("agent-interrupted");
+			return;
+		}
 		sendUserTurn(buildContinuationPrompt(goal), ctx, "continuation", () => goal?.status === "active");
+	});
+
+	pi.on("input", (event: any) => {
+		if (event?.source === "extension") return;
+		if (suppressContinuationUntilUserInput) trace("continuation:unsuppressed user-input");
+		suppressContinuationUntilUserInput = false;
 	});
 
 	// ── Tool: get_goal ──
