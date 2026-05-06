@@ -21,15 +21,15 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import * as os from "node:os";
 import { completeSimple } from "@mariozechner/pi-ai";
 import type { Tool, Message, ToolCall } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { convertToLlm, createReadTool, createWriteTool, createEditTool, createBashTool } from "@mariozechner/pi-coding-agent";
+import { AgentSession, convertToLlm, createReadTool, createWriteTool, createEditTool, createBashTool, getAgentDir } from "@mariozechner/pi-coding-agent";
 
-const HANDOFF_SKILL_PATH = path.join(os.homedir(), ".pi/agent/skills/taskman/handoff.md");
+const AGENT_DIR = getAgentDir();
+const HANDOFF_SKILL_PATH = path.join(AGENT_DIR, "skills/taskman/handoff.md");
 
-const REMEMBER_SKILL_PATH = path.join(os.homedir(), ".pi/agent/skills/taskman/remember.md");
+const REMEMBER_SKILL_PATH = path.join(AGENT_DIR, "skills/taskman/remember.md");
 
 const HANDOFF_REQUEST = `Context is getting long. Your task:
 
@@ -45,48 +45,106 @@ function checkTaskmanAvailable(): boolean {
 	return fs.existsSync(HANDOFF_SKILL_PATH);
 }
 
+type RuntimeCompactionSettings = {
+	enabled?: boolean;
+	reserveTokens?: number;
+	keepRecentTokens?: number;
+};
+
+type ContextWithCompactionSettings = {
+	getCompactionSettings?: () => RuntimeCompactionSettings;
+};
+
+type RunnerWithContext = {
+	createContext: () => object;
+};
+
+type SessionWithCompactionSettings = {
+	settingsManager: {
+		getCompactionSettings: () => RuntimeCompactionSettings;
+	};
+};
+
+const CONTEXT_PATCHED = Symbol.for("taskman-compaction.context-patched");
+const RUNNER_PATCHED = Symbol.for("taskman-compaction.runner-patched");
+
+function installCompactionSettingsContextPatch(): void {
+	const prototype = AgentSession.prototype as any;
+	if (prototype[CONTEXT_PATCHED]) return;
+
+	const originalBindExtensionCore = prototype._bindExtensionCore;
+	if (typeof originalBindExtensionCore !== "function") return;
+
+	prototype._bindExtensionCore = function (runner: RunnerWithContext) {
+		originalBindExtensionCore.call(this, runner);
+		exposeCompactionSettingsOnContext(runner, this as SessionWithCompactionSettings);
+	};
+	prototype[CONTEXT_PATCHED] = true;
+}
+
+function exposeCompactionSettingsOnContext(runner: RunnerWithContext, session: SessionWithCompactionSettings): void {
+	const patchableRunner = runner as RunnerWithContext & { [RUNNER_PATCHED]?: true };
+	if (patchableRunner[RUNNER_PATCHED]) return;
+
+	const originalCreateContext = runner.createContext.bind(runner);
+	runner.createContext = () => {
+		const ctx = originalCreateContext();
+		Object.defineProperty(ctx, "getCompactionSettings", {
+			value: () => session.settingsManager.getCompactionSettings(),
+			enumerable: false,
+			configurable: true,
+		});
+		return ctx;
+	};
+	patchableRunner[RUNNER_PATCHED] = true;
+}
+
+function getRuntimeCompactionSettings(ctx: ContextWithCompactionSettings): Required<RuntimeCompactionSettings> | undefined {
+	const settings = ctx.getCompactionSettings?.();
+	if (!settings) return undefined;
+	return {
+		enabled: settings.enabled ?? true,
+		reserveTokens: settings.reserveTokens ?? 16384,
+		keepRecentTokens: settings.keepRecentTokens ?? 20000,
+	};
+}
+
+function shouldCompactMidTurn(tokens: number, contextWindow: number, settings: RuntimeCompactionSettings): boolean {
+	return settings.enabled !== false && tokens > contextWindow - (settings.reserveTokens ?? 16384);
+}
+
 export default function (pi: ExtensionAPI) {
+	installCompactionSettingsContextPatch();
+
 	// =========================================================================
 	// Mid-turn compaction check
 	// =========================================================================
-	// Framework only checks shouldCompact at agent_end (after entire turn).
-	// During long tool-use turns (100+ tool calls), context grows past threshold
-	// unchecked. This handler checks at each turn_end (after each LLM call +
-	// tool batch) and triggers compaction early via ctx.compact(), which
-	// internally aborts the agent loop then runs our session_before_compact.
+	// Framework compaction is checked at agent_end/pre-prompt. This mirrors the
+	// same threshold at each turn_end (after each LLM call + tool batch) so long
+	// tool-use turns compact before overflowing, while still respecting the live
+	// session settings exposed by ctx.getCompactionSettings().
 	let midTurnCompactPending = false;
-	const settingsPath = path.join(os.homedir(), ".pi/agent/settings.json");
-	function isCompactionEnabled(): boolean {
-		try {
-			const settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
-			return settings?.compaction?.enabled !== false;
-		} catch { return true; } // default: enabled
-	}
 
 	pi.on("turn_end", (event, ctx) => {
 		if (midTurnCompactPending) return;
-		if (!isCompactionEnabled()) return;
 		if (ctx.isIdle()) return;
 
 		const usage = ctx.getContextUsage();
 		if (!usage || usage.tokens === null) return;
 
-		// Hard token threshold rather than percentage — works across context window sizes
-		// (200K and 1M Opus variants). Framework's shouldCompact uses reserveTokens from
-		// settings (not exposed to extensions). 160K matches 200K window with 40K reserve.
-		// Future: could be per-model or read from settings if needed.
-		const MID_TURN_COMPACT_THRESHOLD = 160_000;
-		if (usage.tokens > MID_TURN_COMPACT_THRESHOLD) {
-			midTurnCompactPending = true;
-			ctx.ui.notify(
-				`Context at ${Math.round(usage.tokens / 1000)}K tokens mid-turn, triggering compaction`,
-				"info"
-			);
-			ctx.compact({
-				onComplete: () => { midTurnCompactPending = false; },
-				onError: () => { midTurnCompactPending = false; },
-			});
-		}
+		const settings = getRuntimeCompactionSettings(ctx as ContextWithCompactionSettings);
+		if (!settings) return;
+		if (!shouldCompactMidTurn(usage.tokens, usage.contextWindow, settings)) return;
+
+		midTurnCompactPending = true;
+		ctx.ui.notify(
+			`Context at ${Math.round(usage.tokens / 1000)}K tokens mid-turn, triggering compaction`,
+			"info"
+		);
+		ctx.compact({
+			onComplete: () => { midTurnCompactPending = false; },
+			onError: () => { midTurnCompactPending = false; },
+		});
 	});
 
 	// =========================================================================
