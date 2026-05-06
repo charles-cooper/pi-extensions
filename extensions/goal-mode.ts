@@ -275,6 +275,7 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 			return;
 		}
 
+		resetContinuationState();
 		goal = {
 			id: generateId(),
 			objective: trimmed,
@@ -312,7 +313,7 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 		}
 		goal.status = "active";
 		goal.lastAccountedMs = Date.now();
-		continuationSent = false;
+		resetContinuationState();
 		saveGoal(goal, ctx);
 		updateStatus(ctx);
 		ctx.ui.notify(`Goal resumed: ${goal.objective}`, "info");
@@ -350,10 +351,45 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 		ctx.ui.notify(msg, "info");
 	}
 
+	// ── Continuation state (mirrors Codex GoalRuntimeState) ──
+	//
+	// Codex suppresses auto-continuation after a continuation turn that had
+	// no counted autonomous activity (tool calls). Only user input, external
+	// tool activity, or a new /goal command re-enables continuation.
+	// This prevents infinite loops of text-only "I'm still thinking" responses.
+
+	let continuationSuppressed = false; // true after a fruitless continuation turn
+	let lastTurnHadToolCalls = false;   // did the current/last turn execute any tools?
+	let consecutiveFruitlessContinuations = 0;
+	const MAX_FRUITLESS_CONTINUATIONS = 3;
+
+	function resetContinuationState() {
+		continuationSuppressed = false;
+		continuationSent = false;
+		consecutiveFruitlessContinuations = 0;
+	}
+
 	// ── Events ──
 
 	pi.on("session_start", (_event, ctx) => {
 		restoreGoal(ctx);
+		resetContinuationState();
+	});
+
+	// Track tool calls per turn — resets at turn start, set on tool_call
+	pi.on("turn_start", (_event, _ctx) => {
+		lastTurnHadToolCalls = false;
+	});
+
+	pi.on("tool_call", (_event, _ctx) => {
+		lastTurnHadToolCalls = true;
+		// Productive activity resets continuation suppression (mirrors Codex:
+		// "user/tool/external activity resets it")
+		if (continuationSuppressed) {
+			continuationSuppressed = false;
+			continuationSent = false;
+			consecutiveFruitlessContinuations = 0;
+		}
 	});
 
 	pi.on("turn_end", (_event, ctx) => {
@@ -364,9 +400,6 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 		// If goal just hit budget limit, send budget steering message
 		if ((goal.status as string) === "budget_limited" && !budgetLimitReported) {
 			budgetLimitReported = true;
-			// Use deliverAs: "steer" — turn_end fires mid-loop so agent may
-			// still be processing. steer queues safely; triggerTurn starts
-			// a new LLM call once the current turn finishes.
 			pi.sendMessage({
 				customType: "goal_budget_limited",
 				content: buildBudgetLimitPrompt(goal),
@@ -375,19 +408,35 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 			return;
 		}
 
-		// Reset continuation flag so next idle cycle can send one
-		continuationSent = false;
+		// If this was a continuation turn with no tool calls, suppress next
+		// auto-continuation (mirrors Codex: "continuation turns with no counted
+		// autonomous activity suppress the next automatic continuation until
+		// user/tool/external activity resets it")
+		if (!lastTurnHadToolCalls) {
+			continuationSuppressed = true;
+			consecutiveFruitlessContinuations++;
+		}
 	});
 
-	// When agent goes idle after a turn with an active goal,
-	// send a continuation steering message.
+	// When agent goes idle with an active goal, maybe send continuation.
 	pi.on("agent_end", (_event, ctx) => {
 		if (!goal || goal.status !== "active") return;
 		if (continuationSent) return;
 
+		// Suppress if last continuation turn had no productive activity
+		if (continuationSuppressed) return;
+
+		// Safety: stop after N consecutive fruitless continuations
+		if (consecutiveFruitlessContinuations >= MAX_FRUITLESS_CONTINUATIONS) {
+			ctx.ui.notify(
+				`Goal still active but agent made no progress for ${MAX_FRUITLESS_CONTINUATIONS} turns. ` +
+				`Use /goal pause or interact to continue.`,
+				"warning",
+			);
+			return;
+		}
+
 		continuationSent = true;
-		// Use deliverAs: "steer" — agent_end may fire while runtime still
-		// considers the agent "processing". steer queues safely.
 		pi.sendMessage({
 			customType: "goal_continuation",
 			content: buildContinuationPrompt(goal),
@@ -717,18 +766,11 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 		},
 	});
 
-	// ── System prompt integration ──
+	// ── User input resets continuation (mirrors Codex: "user/tool/external activity resets it") ──
 
-	pi.on("before_agent_start", (_event, _ctx) => {
-		if (!goal || goal.status !== "active") return;
-
-		// Add goal context to system prompt
-		const elapsed = formatElapsed(Date.now() - goal.timeStartedMs);
-		const remaining = goal.tokenBudget
-			? ` (token budget: ${formatTokens(goal.tokenBudget)}, used: ${formatTokens(goal.tokensUsed)}, remaining: ${formatTokens(Math.max(0, goal.tokenBudget - goal.tokensUsed))})`
-			: "";
-		return {
-			systemPrompt: undefined, // Don't modify the full system prompt
-		};
+	pi.on("input", (_event, _ctx) => {
+		if (goal?.status === "active" && continuationSuppressed) {
+			resetContinuationState();
+		}
 	});
 }
