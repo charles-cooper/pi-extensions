@@ -111,7 +111,7 @@ Budget:
 - Token budget: ${tokenBudget ?? "none"}
 - Tokens remaining: ${remainingTokens}
 
-Avoid repeating work that is already done. Choose the next concrete action toward the objective.
+Avoid repeating work that is already done. Choose the next concrete action toward the objective. Call tools immediately — do not output a status update or summary. Keep making tool calls until the goal is done.
 
 Before deciding that the goal is achieved, perform a completion audit against the actual current state:
 - Restate the objective as concrete deliverables or success criteria.
@@ -400,11 +400,7 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 		// If goal just hit budget limit, send budget steering message
 		if ((goal.status as string) === "budget_limited" && !budgetLimitReported) {
 			budgetLimitReported = true;
-			pi.sendMessage({
-				customType: "goal_budget_limited",
-				content: buildBudgetLimitPrompt(goal),
-				display: false,
-			}, { deliverAs: "steer", triggerTurn: true });
+			pi.sendUserMessage(buildBudgetLimitPrompt(goal), { deliverAs: "steer" });
 			return;
 		}
 
@@ -437,11 +433,13 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 		}
 
 		continuationSent = true;
-		pi.sendMessage({
-			customType: "goal_continuation",
-			content: buildContinuationPrompt(goal),
-			display: false,
-		}, { deliverAs: "steer", triggerTurn: true });
+		// Use sendUserMessage (not sendMessage) — the model treats user
+		// messages as real work prompts. sendMessage with steer/deliverAs
+		// arrives as a low-priority system message that the model just
+		// acknowledges in text without acting. Codex injects continuation
+		// as a developer-role message inside the turn loop; sendUserMessage
+		// is the closest pi equivalent.
+		pi.sendUserMessage(buildContinuationPrompt(goal), { deliverAs: "steer" });
 	});
 
 	// ── Tools ──
