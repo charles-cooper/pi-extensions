@@ -131,7 +131,6 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 	let debugEnabled = process.env.PI_GOAL_DEBUG === "1";
 	const recentEvents: string[] = [];
 	let pendingSend: ReturnType<typeof setTimeout> | undefined;
-	let suppressContinuationUntilUserInput = false;
 
 	function trace(event: string) {
 		const status = goal?.status ?? "none";
@@ -178,10 +177,6 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 			return;
 		}
 		if (attempt > 0) pendingSend = undefined;
-		if (suppressContinuationUntilUserInput) {
-			trace(`${event}:suppressed-until-user-input`);
-			return;
-		}
 		if (!shouldSend()) {
 			trace(`${event}:cancelled`);
 			return;
@@ -262,7 +257,6 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 		const now = Date.now();
 		goal = { id: generateId(), objective: trimmed, status: "active", tokenBudget, tokensUsed: 0, timeStartedMs: now, lastAccountedMs: now };
 		budgetLimitReported = false;
-		suppressContinuationUntilUserInput = false;
 		saveGoal(ctx); updateStatus(ctx);
 		ctx.ui.notify(`Goal active${tokenBudget ? ` (budget: ${formatTokens(tokenBudget)} tok)` : ""}: ${trimmed}`, "info");
 	}
@@ -270,8 +264,10 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 	function pauseGoal(ctx: ExtensionContext) {
 		if (!goal || goal.status !== "active") { ctx.ui.notify("No active goal to pause", "warning"); return; }
 		accountTokens(ctx);
+		if (!goal || goal.status !== "active") return;
 		goal.status = "paused";
 		saveGoal(ctx); updateStatus(ctx);
+		cancelPendingContinuation("manual-pause");
 		ctx.ui.notify(`Goal paused: ${goal.objective}`, "info");
 	}
 
@@ -279,7 +275,6 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 		if (!goal || goal.status !== "paused") { ctx.ui.notify("No paused goal to resume", "warning"); return; }
 		goal.status = "active";
 		goal.lastAccountedMs = Date.now();
-		suppressContinuationUntilUserInput = false;
 		saveGoal(ctx); updateStatus(ctx);
 		ctx.ui.notify(`Goal resumed: ${goal.objective}`, "info");
 	}
@@ -289,16 +284,29 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 		const id = goal.id;
 		goal = null;
 		budgetLimitReported = false;
+		cancelPendingContinuation("clear");
 		pi.appendEntry(ENTRY_TYPE, { cleared: true, clearedGoalId: id });
 		updateStatus(ctx);
 		ctx.ui.notify("Goal cleared", "info");
 	}
 
+	function pauseGoalForInterrupt(ctx: ExtensionContext, reason: string) {
+		if (!goal || goal.status !== "active") return;
+		accountTokens(ctx);
+		if (!goal || goal.status !== "active") return;
+		goal.status = "paused";
+		saveGoal(ctx); updateStatus(ctx);
+		cancelPendingContinuation(reason);
+		ctx.ui.notify(`Goal paused due to interrupt. Use /goal resume to continue.`, "info");
+	}
+
 	function completeGoal(ctx: ExtensionContext) {
 		if (!goal) return;
 		accountTokens(ctx);
+		if (!goal) return;
 		goal.status = "complete";
 		saveGoal(ctx); updateStatus(ctx);
+		cancelPendingContinuation("complete");
 		const elapsed = formatElapsed(Date.now() - goal.timeStartedMs);
 		let msg = `Goal complete: ${goal.objective}\nTime: ${elapsed}`;
 		if (goal.tokenBudget) msg += `\nTokens: ${formatTokens(goal.tokensUsed)} / ${formatTokens(goal.tokenBudget)}`;
@@ -318,8 +326,7 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 		if (!goal || goal.status !== "active") return;
 		trace("turn_end");
 		if (eventWasInterrupted(event)) {
-			suppressContinuationUntilUserInput = true;
-			cancelPendingContinuation("turn-interrupted");
+			pauseGoalForInterrupt(ctx, "turn-interrupted");
 			return;
 		}
 		accountTokens(ctx);
@@ -333,17 +340,10 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 		if (!goal || goal.status !== "active") return;
 		trace("agent_end");
 		if (eventWasInterrupted(event)) {
-			suppressContinuationUntilUserInput = true;
-			cancelPendingContinuation("agent-interrupted");
+			pauseGoalForInterrupt(ctx, "agent-interrupted");
 			return;
 		}
 		sendUserTurn(buildContinuationPrompt(goal), ctx, "continuation", () => goal?.status === "active");
-	});
-
-	pi.on("input", (event: any) => {
-		if (event?.source === "extension") return;
-		if (suppressContinuationUntilUserInput) trace("continuation:unsuppressed user-input");
-		suppressContinuationUntilUserInput = false;
 	});
 
 	// ── Tool: get_goal ──
