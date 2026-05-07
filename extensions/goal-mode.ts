@@ -120,11 +120,18 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 	}
 
 	function eventWasInterrupted(event: unknown): boolean {
-		return collectDiagnosticStrings(event).some((text) => /abort|interrupt|cancel/i.test(text));
+		return collectStopReasons(event).some(isInterruptStopReason);
+	}
+
+	function isInterruptStopReason(reason: string): boolean {
+		const normalized = reason.toLowerCase().replace(/[\s_-]+/g, "");
+		return normalized === "aborted" || normalized === "abort" ||
+			normalized === "interrupted" || normalized === "interrupt" ||
+			normalized === "cancelled" || normalized === "canceled" || normalized === "cancel";
 	}
 
 	function rateLimitDelayMs(event: unknown): number | undefined {
-		const text = collectDiagnosticStrings(event).join("\n");
+		const text = collectErrorDiagnostics(event).join("\n");
 		if (!/(usage limit|rate limit|try again|too many requests)/i.test(text)) return undefined;
 		const parsed = parseRetryDelayMs(text);
 		const next = rateLimitBackoffMs > 0
@@ -145,17 +152,25 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 		return value * 60 * 1000;
 	}
 
-	function collectDiagnosticStrings(value: unknown, depth = 0): string[] {
+	function collectStopReasons(value: unknown, depth = 0): string[] {
+		return collectFields(value, ["stopReason", "finishReason"], depth);
+	}
+
+	function collectErrorDiagnostics(value: unknown, depth = 0): string[] {
+		return collectFields(value, ["errorMessage", "error"], depth);
+	}
+
+	function collectFields(value: unknown, keys: string[], depth = 0): string[] {
 		if (depth > 5 || value == null || typeof value !== "object") return [];
-		if (Array.isArray(value)) return value.flatMap((item) => collectDiagnosticStrings(item, depth + 1));
+		if (Array.isArray(value)) return value.flatMap((item) => collectFields(item, keys, depth + 1));
 		const input = value as Record<string, unknown>;
 		const strings: string[] = [];
-		for (const key of ["stopReason", "errorMessage", "error", "finishReason"] as const) {
+		for (const key of keys) {
 			const item = input[key];
 			if (typeof item === "string") strings.push(item);
-			else strings.push(...collectDiagnosticStrings(item, depth + 1));
+			else strings.push(...collectFields(item, keys, depth + 1));
 		}
-		strings.push(...collectDiagnosticStrings(input.messages, depth + 1));
+		strings.push(...collectFields(input.messages, keys, depth + 1));
 		return strings;
 	}
 
