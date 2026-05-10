@@ -86,9 +86,9 @@ function buildStartPrompt(goal: Goal): string {
 function buildGoalWorkPrompt(goal: Goal, reason: string): string {
 	return `${reason}
 
-<untrusted_goal_objective>
+<user_goal>
 ${goal.objective}
-</untrusted_goal_objective>
+</user_goal>
 
 Goal state:
 - Status: ${goal.status}
@@ -109,9 +109,9 @@ function buildBudgetLimitPrompt(goal: Goal): string {
 	const elapsed = formatElapsed(Date.now() - goal.timeStartedMs);
 	return `The active thread goal has reached its token budget.
 
-<untrusted_objective>
+<user_goal>
 ${goal.objective}
-</untrusted_objective>
+</user_goal>
 
 Budget:
 - Time spent pursuing goal: ${elapsed}
