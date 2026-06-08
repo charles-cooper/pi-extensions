@@ -34,6 +34,7 @@ interface Goal {
 const ENTRY_TYPE = "goal_mode";
 const MAX_RATE_LIMIT_BACKOFF_MS = 30 * 60 * 1000;
 const COMPACTION_INTERRUPT_GRACE_MS = 15 * 1000;
+const MAX_GOAL_OBJECTIVE_CHARS = 4000;
 
 // ── Formatters ──
 
@@ -311,7 +312,7 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 	function setGoal(objective: string, tokenBudget: number | null, ctx: ExtensionContext) {
 		const trimmed = objective.trim();
 		if (!trimmed) { ctx.ui.notify("Objective cannot be empty", "error"); return; }
-		if (trimmed.length > 500) { ctx.ui.notify("Objective too long (max 500 chars)", "error"); return; }
+		if (trimmed.length > MAX_GOAL_OBJECTIVE_CHARS) { ctx.ui.notify(`Objective too long (max ${MAX_GOAL_OBJECTIVE_CHARS} chars)`, "error"); return; }
 		const now = Date.now();
 		cancelPendingContinuation("set-goal");
 		goal = { id: generateId(), objective: trimmed, status: "active", tokenBudget, tokensUsed: 0, timeStartedMs: now, lastAccountedMs: now };
