@@ -21,10 +21,10 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { completeSimple } from "@mariozechner/pi-ai";
-import type { Tool, Message, ToolCall } from "@mariozechner/pi-ai";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { AgentSession, convertToLlm, createReadTool, createWriteTool, createEditTool, createBashTool, getAgentDir } from "@mariozechner/pi-coding-agent";
+import { completeSimple } from "@earendil-works/pi-ai";
+import type { Tool, Message, ToolCall } from "@earendil-works/pi-ai";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { AgentSession, convertToLlm, createReadTool, createWriteTool, createEditTool, createBashTool, getAgentDir } from "@earendil-works/pi-coding-agent";
 
 const AGENT_DIR = getAgentDir();
 const HANDOFF_SKILL_PATH = path.join(AGENT_DIR, "skills/taskman/handoff.md");

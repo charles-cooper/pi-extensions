@@ -13,9 +13,9 @@
  * to stop the loop and `/goal resume` to restart it.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { Type, StringEnum } from "@mariozechner/pi-ai";
-import { Text, Container, Spacer } from "@mariozechner/pi-tui";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Type, StringEnum } from "@earendil-works/pi-ai";
+import { Text, Container, Spacer } from "@earendil-works/pi-tui";
 
 // ── Types ──
 
