@@ -294,17 +294,95 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 
 	// ── Token accounting ──
 
-	function accountTokens(ctx: ExtensionContext) {
-		if (!goal || goal.status !== "active") return;
-		const tokens = ctx.getContextUsage()?.tokens ?? 0;
-		goal.tokensUsed = Math.max(goal.tokensUsed, tokens > 0 ? tokens : goal.tokensUsed);
+	function accountTokens(ctx: ExtensionContext, currentMessage?: unknown) {
+		if (!goal) return;
+		const tokens = tokensUsedSinceGoalStart(ctx, currentMessage) ?? fallbackContextTokens(ctx);
+		if (tokens !== undefined) goal.tokensUsed = tokens;
 		goal.lastAccountedMs = Date.now();
-		if (goal.tokenBudget && goal.tokensUsed >= goal.tokenBudget) {
+		if (goal.status === "active" && goal.tokenBudget && goal.tokensUsed >= goal.tokenBudget) {
 			goal.status = "budget_limited";
 			budgetLimitReported = false;
 		}
 		saveGoal(ctx);
 		updateStatus(ctx);
+	}
+
+	function tokensUsedSinceGoalStart(ctx: ExtensionContext, currentMessage?: unknown): number | undefined {
+		if (!goal) return undefined;
+		const messages = assistantMessagesSinceGoalStart(ctx, currentMessage);
+		const total = messages.reduce((sum, message) => sum + assistantUsageTokens(message), 0);
+		return total > 0 ? total : undefined;
+	}
+
+	function assistantMessagesSinceGoalStart(ctx: ExtensionContext, currentMessage?: unknown): unknown[] {
+		if (!goal) return [];
+		const messages: unknown[] = [];
+		const seen = new Set<string>();
+		for (const entry of ctx.sessionManager.getBranch()) {
+			if (entry.type !== "message") continue;
+			rememberAssistantMessage(messages, seen, entry.message, Date.parse(entry.timestamp));
+		}
+		rememberAssistantMessage(messages, seen, currentMessage, undefined);
+		return messages.filter((message) => messageTimestamp(message) >= goal!.timeStartedMs);
+	}
+
+	function rememberAssistantMessage(messages: unknown[], seen: Set<string>, message: unknown, fallbackTimestamp: number | undefined) {
+		if (!isAssistantMessage(message)) return;
+		const key = assistantMessageKey(message, fallbackTimestamp);
+		if (seen.has(key)) return;
+		seen.add(key);
+		messages.push(message);
+	}
+
+	function assistantMessageKey(message: Record<string, unknown>, fallbackTimestamp: number | undefined): string {
+		const usage = usageRecord(message);
+		return [
+			message.responseId,
+			message.provider,
+			message.model,
+			messageTimestamp(message, fallbackTimestamp),
+			usage?.input,
+			usage?.output,
+			usage?.cacheRead,
+			usage?.cacheWrite,
+			usage?.totalTokens,
+		].join(":");
+	}
+
+	function isAssistantMessage(message: unknown): message is Record<string, unknown> {
+		return !!message && typeof message === "object" && (message as Record<string, unknown>).role === "assistant";
+	}
+
+	function messageTimestamp(message: unknown, fallback = 0): number {
+		if (!message || typeof message !== "object") return fallback;
+		const timestamp = (message as Record<string, unknown>).timestamp;
+		return typeof timestamp === "number" && Number.isFinite(timestamp) ? timestamp : fallback;
+	}
+
+	function assistantUsageTokens(message: unknown): number {
+		const usage = usageRecord(message);
+		if (!usage) return 0;
+		const totalTokens = positiveNumber(usage.totalTokens);
+		const itemized = [usage.input, usage.output, usage.cacheRead, usage.cacheWrite]
+			.map(positiveNumber)
+			.reduce((sum, n) => sum + n, 0);
+		return Math.max(totalTokens, itemized);
+	}
+
+	function usageRecord(message: unknown): Record<string, unknown> | undefined {
+		if (!message || typeof message !== "object") return undefined;
+		const usage = (message as Record<string, unknown>).usage;
+		return usage && typeof usage === "object" ? usage as Record<string, unknown> : undefined;
+	}
+
+	function positiveNumber(value: unknown): number {
+		return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+	}
+
+	function fallbackContextTokens(ctx: ExtensionContext): number | undefined {
+		const tokens = ctx.getContextUsage()?.tokens ?? undefined;
+		if (typeof tokens !== "number" || tokens <= 0) return undefined;
+		return Math.max(goal?.tokensUsed ?? 0, tokens);
 	}
 
 	// ── Goal mutations ──
@@ -395,14 +473,14 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("turn_end", (event, ctx) => {
-		if (!goal || goal.status !== "active") return;
+		if (!goal) return;
 		trace("turn_end");
-		if (eventWasInterrupted(event) && shouldPauseForInterrupt()) {
+		if (goal.status === "active" && eventWasInterrupted(event) && shouldPauseForInterrupt()) {
 			pauseGoalForInterrupt(ctx, "turn-interrupted");
 			return;
 		}
-		accountTokens(ctx);
-		if (goal.status === "budget_limited" && !budgetLimitReported) {
+		if (goal.status === "active" || goal.status === "complete") accountTokens(ctx, event.message);
+		if (goal?.status === "budget_limited" && !budgetLimitReported) {
 			budgetLimitReported = true;
 			sendUserTurn(buildBudgetLimitPrompt(goal), ctx, "budget_limit", () => goal?.status === "budget_limited");
 		}
