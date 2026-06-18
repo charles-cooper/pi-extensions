@@ -150,28 +150,57 @@ export default function (pi: ExtensionAPI) {
 	// =========================================================================
 	// Post-compaction continue message
 	// =========================================================================
-	// Track if we've already sent the continue message for this compaction
-	// After compaction, auto-continue so the agent acts on the summary.
-	// For overflow: framework also calls agent.continue() at 100ms — ours wins (starts first),
-	// framework's continue() throws "already processing" and is silently swallowed. Fine.
-	// For queued messages: skip — framework's continue() handles delivery.
+	// session_compact fires before pi emits compaction_end. The TUI only flushes
+	// messages typed during compaction on compaction_end, so sending immediately
+	// races/stalls user steering. Defer until the next macrotask and never preempt
+	// queued user input; if a user turn already started, append our nudge after it.
 	let continueMessageSent = false;
-	pi.on("session_compact", async (event, ctx) => {
-		midTurnCompactPending = false; // Reset guard after any compaction
-		if (continueMessageSent) return;
-		continueMessageSent = true;
+	let continueMessageTimer: ReturnType<typeof setTimeout> | undefined;
+
+	function clearContinueMessageTimer(): void {
+		if (!continueMessageTimer) return;
+		clearTimeout(continueMessageTimer);
+		continueMessageTimer = undefined;
+	}
+
+	function sendContinueMessage(deliverAs?: "followUp"): void {
 		pi.sendMessage(
 			{
 				customType: "compaction_continue",
 				content: "Load /taskman skill and /continue the task specified in the handoff.",
 				display: false,
 			},
-			{ triggerTurn: true },
+			{ triggerTurn: true, ...(deliverAs ? { deliverAs } : {}) },
 		);
+	}
+
+	function schedulePostCompactionContinue(ctx: { isIdle(): boolean; hasPendingMessages(): boolean }): void {
+		if (continueMessageSent) return;
+		continueMessageSent = true;
+		clearContinueMessageTimer();
+		continueMessageTimer = setTimeout(() => {
+			continueMessageTimer = undefined;
+			try {
+				if (!ctx.isIdle()) {
+					sendContinueMessage("followUp");
+					return;
+				}
+				if (ctx.hasPendingMessages()) return;
+				sendContinueMessage();
+			} catch {
+				// Context may be stale if the user reloaded/switched sessions during compaction.
+			}
+		}, 250);
+	}
+
+	pi.on("session_compact", async (event, ctx) => {
+		midTurnCompactPending = false; // Reset guard after any compaction
+		schedulePostCompactionContinue(ctx);
 	});
 
 	pi.on("session_before_compact", async (event, ctx) => {
 		continueMessageSent = false; // Reset for next compaction
+		clearContinueMessageTimer();
 		const { preparation, signal, customInstructions } = event;
 		const { messagesToSummarize, turnPrefixMessages, tokensBefore, firstKeptEntryId, previousSummary, fileOps, settings } = preparation;
 
