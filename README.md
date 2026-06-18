@@ -165,7 +165,7 @@ Default compaction uses a rigid structured format. This extension:
 
 ### Usage
 
-Add to `~/.pi/settings.jsonl`:
+Add to `~/.pi/agent/settings.json`:
 ```json
 {"extensions": ["~/pi-extensions/extensions/taskman-compaction.ts"]}
 ```
@@ -176,6 +176,19 @@ Default compaction triggers at ~92% context. To trigger earlier (~70%):
 ```json
 {"compaction": {"reserveTokens": 60000}}
 ```
+
+The mid-turn interrupt uses the same `compaction.enabled` and `compaction.reserveTokens` threshold:
+```json
+{
+  "compaction": {
+    "enabled": true,
+    "reserveTokens": 60000
+  }
+}
+```
+
+- `compaction.reserveTokens`: shared safety margin before the model context limit.
+- During streaming, taskman compaction aborts as soon as the estimated context crosses that threshold, then compacts after the agent becomes idle.
 
 ### Requirements
 

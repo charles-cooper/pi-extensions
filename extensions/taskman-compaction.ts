@@ -24,7 +24,7 @@ import * as path from "node:path";
 import { completeSimple } from "@earendil-works/pi-ai";
 import type { Tool, Message, ToolCall } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { AgentSession, convertToLlm, createReadTool, createWriteTool, createEditTool, createBashTool, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { convertToLlm, createReadTool, createWriteTool, createEditTool, getAgentDir, serializeConversation } from "@earendil-works/pi-coding-agent";
 
 const AGENT_DIR = getAgentDir();
 const HANDOFF_SKILL_PATH = path.join(AGENT_DIR, "skills/taskman/handoff.md");
@@ -45,169 +45,132 @@ function checkTaskmanAvailable(): boolean {
 	return fs.existsSync(HANDOFF_SKILL_PATH);
 }
 
-type RuntimeCompactionSettings = {
-	enabled?: boolean;
-	reserveTokens?: number;
-	keepRecentTokens?: number;
+type TaskmanCompactionSettings = {
+	compactionEnabled: boolean;
+	reserveTokens: number;
 };
 
-type ContextWithCompactionSettings = {
-	getCompactionSettings?: () => RuntimeCompactionSettings;
+const DEFAULT_TASKMAN_COMPACTION_SETTINGS: TaskmanCompactionSettings = {
+	compactionEnabled: true,
+	reserveTokens: 16384,
 };
 
-type RunnerWithContext = {
-	createContext: () => object;
-};
-
-type SessionWithCompactionSettings = {
-	settingsManager: {
-		getCompactionSettings: () => RuntimeCompactionSettings;
-	};
-};
-
-const CONTEXT_PATCHED = Symbol.for("taskman-compaction.context-patched");
-const RUNNER_PATCHED = Symbol.for("taskman-compaction.runner-patched");
-
-function installCompactionSettingsContextPatch(): void {
-	const prototype = AgentSession.prototype as any;
-	if (prototype[CONTEXT_PATCHED]) return;
-
-	const originalBindExtensionCore = prototype._bindExtensionCore;
-	if (typeof originalBindExtensionCore !== "function") return;
-
-	prototype._bindExtensionCore = function (runner: RunnerWithContext) {
-		originalBindExtensionCore.call(this, runner);
-		exposeCompactionSettingsOnContext(runner, this as SessionWithCompactionSettings);
-	};
-	prototype[CONTEXT_PATCHED] = true;
+function readSettingsFile(filePath: string): unknown {
+	try {
+		return JSON.parse(fs.readFileSync(filePath, "utf8"));
+	} catch {
+		return undefined;
+	}
 }
 
-function exposeCompactionSettingsOnContext(runner: RunnerWithContext, session: SessionWithCompactionSettings): void {
-	const patchableRunner = runner as RunnerWithContext & { [RUNNER_PATCHED]?: true };
-	if (patchableRunner[RUNNER_PATCHED]) return;
-
-	const originalCreateContext = runner.createContext.bind(runner);
-	runner.createContext = () => {
-		const ctx = originalCreateContext();
-		Object.defineProperty(ctx, "getCompactionSettings", {
-			value: () => session.settingsManager.getCompactionSettings(),
-			enumerable: false,
-			configurable: true,
-		});
-		return ctx;
-	};
-	patchableRunner[RUNNER_PATCHED] = true;
+function numberSetting(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
-function getRuntimeCompactionSettings(ctx: ContextWithCompactionSettings): Required<RuntimeCompactionSettings> | undefined {
-	const settings = ctx.getCompactionSettings?.();
-	if (!settings) return undefined;
+function applyTaskmanCompactionSettings(settings: TaskmanCompactionSettings, raw: unknown): TaskmanCompactionSettings {
+	if (!raw || typeof raw !== "object") return settings;
+	const root = raw as Record<string, unknown>;
+	const compaction = root.compaction && typeof root.compaction === "object"
+		? root.compaction as Record<string, unknown>
+		: undefined;
 	return {
-		enabled: settings.enabled ?? true,
-		reserveTokens: settings.reserveTokens ?? 16384,
-		keepRecentTokens: settings.keepRecentTokens ?? 20000,
+		compactionEnabled: typeof compaction?.enabled === "boolean" ? compaction.enabled : settings.compactionEnabled,
+		reserveTokens: numberSetting(compaction?.reserveTokens) ?? settings.reserveTokens,
 	};
 }
 
-function shouldCompactMidTurn(tokens: number, contextWindow: number, settings: RuntimeCompactionSettings): boolean {
-	return settings.enabled !== false && tokens > contextWindow - (settings.reserveTokens ?? 16384);
+function getTaskmanCompactionSettings(cwd: string): TaskmanCompactionSettings {
+	let settings = { ...DEFAULT_TASKMAN_COMPACTION_SETTINGS };
+	settings = applyTaskmanCompactionSettings(settings, readSettingsFile(path.join(AGENT_DIR, "settings.json")));
+	settings = applyTaskmanCompactionSettings(settings, readSettingsFile(path.join(cwd, ".pi/settings.json")));
+	return settings;
+}
+
+function estimateContentTokens(content: unknown): number {
+	if (typeof content === "string") return Math.ceil(content.length / 4);
+	if (!Array.isArray(content)) return 0;
+	let chars = 0;
+	for (const block of content) {
+		if (!block || typeof block !== "object") continue;
+		const value = block as Record<string, unknown>;
+		if (value.type === "text" && typeof value.text === "string") chars += value.text.length;
+		if (value.type === "thinking" && typeof value.thinking === "string") chars += value.thinking.length;
+	}
+	return Math.ceil(chars / 4);
+}
+
+function assistantOutputTokens(message: unknown): number {
+	if (!message || typeof message !== "object") return 0;
+	return estimateContentTokens((message as Record<string, unknown>).content);
 }
 
 export default function (pi: ExtensionAPI) {
-	installCompactionSettingsContextPatch();
+	let compactAfterCurrentAgent = false;
+	let compactionScheduled = false;
 
-	// =========================================================================
-	// Mid-turn compaction check
-	// =========================================================================
-	// Framework compaction is checked at agent_end/pre-prompt. This mirrors the
-	// same threshold at each turn_end (after each LLM call + tool batch) so long
-	// tool-use turns compact before overflowing, while still respecting the live
-	// session settings exposed by ctx.getCompactionSettings().
-	let midTurnCompactPending = false;
-
-	pi.on("turn_end", (event, ctx) => {
-		if (midTurnCompactPending) return;
-		if (ctx.isIdle()) return;
-
+	function contextOverThreshold(ctx: { cwd: string; getContextUsage(): { tokens: number | null; contextWindow: number } | undefined }, extraTokens = 0): boolean {
 		const usage = ctx.getContextUsage();
-		if (!usage || usage.tokens === null) return;
+		if (!usage || usage.tokens === null || usage.contextWindow <= 0) return false;
+		const settings = getTaskmanCompactionSettings(ctx.cwd);
+		if (!settings.compactionEnabled) return false;
+		return usage.tokens + extraTokens > usage.contextWindow - settings.reserveTokens;
+	}
 
-		const settings = getRuntimeCompactionSettings(ctx as ContextWithCompactionSettings);
-		if (!settings) return;
-		if (!shouldCompactMidTurn(usage.tokens, usage.contextWindow, settings)) return;
+	function requestCompactionAfterAgent(ctx: { ui: { notify(message: string, level: "info" | "warning" | "error"): void }; abort(): void }, reason: string): void {
+		if (compactAfterCurrentAgent) return;
+		compactAfterCurrentAgent = true;
+		ctx.ui.notify(`${reason}; will compact after current turn boundary`, "info");
+		ctx.abort();
+	}
 
-		midTurnCompactPending = true;
-		ctx.ui.notify(
-			`Context at ${Math.round(usage.tokens / 1000)}K tokens mid-turn, triggering compaction`,
-			"info"
-		);
-		ctx.compact({
-			onComplete: () => { midTurnCompactPending = false; },
-			onError: () => { midTurnCompactPending = false; },
-		});
+	function scheduleCompaction(ctx: { isIdle(): boolean; compact(options?: { onComplete?: () => void; onError?: (error: Error) => void }): void; ui: { notify(message: string, level: "info" | "warning" | "error"): void } }, attempt = 0): void {
+		if (compactionScheduled && attempt === 0) return;
+		compactionScheduled = true;
+		setTimeout(() => {
+			if (!ctx.isIdle() && attempt < 50) {
+				scheduleCompaction(ctx, attempt + 1);
+				return;
+			}
+			if (!ctx.isIdle()) {
+				compactionScheduled = false;
+				ctx.ui.notify("Skipped deferred compaction because agent did not become idle", "warning");
+				return;
+			}
+			ctx.compact({
+				onComplete: () => { compactionScheduled = false; },
+				onError: (error) => {
+					compactionScheduled = false;
+					ctx.ui.notify(`Deferred compaction failed: ${error.message}`, "warning");
+				},
+			});
+		}, 100);
+	}
+
+	pi.on("message_update", (event, ctx) => {
+		const outputTokens = assistantOutputTokens((event as any).message);
+		if (!contextOverThreshold(ctx, outputTokens)) return;
+		requestCompactionAfterAgent(ctx, `Assistant output crossed context safety threshold`);
 	});
 
-	// =========================================================================
-	// Post-compaction continue message
-	// =========================================================================
-	// session_compact fires before pi emits compaction_end. The TUI only flushes
-	// messages typed during compaction on compaction_end, so sending immediately
-	// races/stalls user steering. Defer until the next macrotask and never preempt
-	// queued user input; if a user turn already started, append our nudge after it.
-	let continueMessageSent = false;
-	let continueMessageTimer: ReturnType<typeof setTimeout> | undefined;
+	pi.on("turn_end", (_event, ctx) => {
+		if (!contextOverThreshold(ctx)) return;
+		requestCompactionAfterAgent(ctx, "Context is near limit at turn boundary");
+	});
 
-	function clearContinueMessageTimer(): void {
-		if (!continueMessageTimer) return;
-		clearTimeout(continueMessageTimer);
-		continueMessageTimer = undefined;
-	}
-
-	function sendContinueMessage(deliverAs?: "followUp"): void {
-		pi.sendMessage(
-			{
-				customType: "compaction_continue",
-				content: "Load /taskman skill and /continue the task specified in the handoff.",
-				display: false,
-			},
-			{ triggerTurn: true, ...(deliverAs ? { deliverAs } : {}) },
-		);
-	}
-
-	function schedulePostCompactionContinue(ctx: { isIdle(): boolean; hasPendingMessages(): boolean }): void {
-		if (continueMessageSent) return;
-		continueMessageSent = true;
-		clearContinueMessageTimer();
-		continueMessageTimer = setTimeout(() => {
-			continueMessageTimer = undefined;
-			try {
-				if (!ctx.isIdle()) {
-					sendContinueMessage("followUp");
-					return;
-				}
-				if (ctx.hasPendingMessages()) return;
-				sendContinueMessage();
-			} catch {
-				// Context may be stale if the user reloaded/switched sessions during compaction.
-			}
-		}, 250);
-	}
-
-	pi.on("session_compact", async (event, ctx) => {
-		midTurnCompactPending = false; // Reset guard after any compaction
-		schedulePostCompactionContinue(ctx);
+	pi.on("agent_end", (_event, ctx) => {
+		if (!compactAfterCurrentAgent) return;
+		compactAfterCurrentAgent = false;
+		scheduleCompaction(ctx);
 	});
 
 	pi.on("session_before_compact", async (event, ctx) => {
-		continueMessageSent = false; // Reset for next compaction
-		clearContinueMessageTimer();
 		const { preparation, signal, customInstructions } = event;
 		const { messagesToSummarize, turnPrefixMessages, tokensBefore, firstKeptEntryId, previousSummary, fileOps, settings } = preparation;
 
 		// Warn if reserveTokens is too low for multi-turn agent loop
 		if (settings.reserveTokens < 25000) {
 			ctx.ui.notify(
-				`reserveTokens is ${settings.reserveTokens} (recommend ≥25000 for taskman compaction). Add {"compaction":{"reserveTokens":25000}} to settings.jsonl`,
+				`reserveTokens is ${settings.reserveTokens} (recommend ≥25000 for taskman compaction). Add {"compaction":{"reserveTokens":25000}} to settings.json`,
 				"warning"
 			);
 		}
@@ -235,10 +198,10 @@ export default function (pi: ExtensionAPI) {
 		const headers = auth.headers;
 
 		// Combine messages and convert to LLM format.
-		// Framework bug workaround: findCutPoint with keepRecentTokens:0 produces empty
-		// messagesToSummarize when the last entry is a toolResult (not a valid cut point).
-		// Since we set firstKeptEntryId:null (keep nothing), we need ALL messages after
-		// the last compaction. Extract from branchEntries as fallback.
+		// Framework bug workaround: custom compaction can receive an empty summarized
+		// span when the computed cut point cannot summarize a complete/split turn.
+		// In that case, summarize messages after the last compaction as fallback while
+		// still preserving Pi's prepared firstKeptEntryId boundary.
 		let allMessages = [...messagesToSummarize, ...turnPrefixMessages];
 		if (allMessages.length === 0) {
 			const { branchEntries } = event;
@@ -258,14 +221,15 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 		const llmMessages = convertToLlm(allMessages);
+		const conversationText = serializeConversation(llmMessages);
 
 		// If still no messages (e.g., immediate re-compaction with <3 entries),
-		// return previous summary with clean context instead of falling through to default
-		if (llmMessages.length === 0) {
+		// return previous summary while retaining Pi's safe recent-message boundary.
+		if (!conversationText.trim()) {
 			return {
 				compaction: {
 					summary: previousSummary || "/taskman continue",
-					firstKeptEntryId: null as any,
+					firstKeptEntryId,
 					tokensBefore,
 					details: {},
 				},
@@ -279,7 +243,6 @@ export default function (pi: ExtensionAPI) {
 			createReadTool(ctx.cwd),
 			createWriteTool(ctx.cwd),
 			createEditTool(ctx.cwd),
-			createBashTool(ctx.cwd),
 		];
 		const toolDefs: Tool[] = agentTools.map(t => ({
 			name: t.name,
@@ -310,10 +273,12 @@ Also include:
 - Breadcrumbs (file paths, commands) to reconstruct state`;
 
 		let messages: Message[] = [
-			...llmMessages,
 			{
 				role: "user" as const,
-				content: [{ type: "text" as const, text: HANDOFF_REQUEST + previousContext + customContext }],
+				content: [{
+					type: "text" as const,
+					text: `<conversation_to_handoff>\n${conversationText}\n</conversation_to_handoff>\n\n${HANDOFF_REQUEST}${previousContext}${customContext}`,
+				}],
 				timestamp: Date.now(),
 			},
 		];
@@ -384,6 +349,7 @@ Also include:
 					ctx.ui.notify(`✎ ${label}`, "info");
 					try {
 						const result = await tool.execute(tc.id, tc.arguments, signal);
+						if (signal.aborted) throw new Error("Compaction cancelled");
 						return {
 							role: "toolResult" as const,
 							toolCallId: tc.id,
@@ -393,6 +359,7 @@ Also include:
 							timestamp: Date.now(),
 						};
 					} catch (err) {
+						if (signal.aborted) throw err;
 						const errMsg = err instanceof Error ? err.message : String(err);
 						ctx.ui.notify(`⚠ compaction ${label}: ${errMsg}`, "warning");
 						return {
@@ -406,10 +373,9 @@ Also include:
 					}
 				}));
 
-				// Add assistant response and tool results to messages
-				// Keep thinking blocks — completeSimple's transform pipeline handles them:
-				// transformMessages() preserves thinking for same-model, converts to text for
-				// cross-model. convertMessages() handles signature validation. No need to strip.
+				if (signal.aborted) throw new Error("Compaction cancelled");
+
+				// Add assistant response and tool results to messages.
 				// Spread response to preserve metadata (model, provider, api) for isSameModel checks.
 				messages = [
 					...messages,
@@ -433,7 +399,7 @@ Also include:
 			return {
 				compaction: {
 					summary,
-					firstKeptEntryId: null as any, // Keep ZERO old messages — clean slate after compaction
+					firstKeptEntryId,
 					tokensBefore,
 					details: { readFiles, modifiedFiles },
 				},
@@ -448,7 +414,7 @@ Also include:
 			return {
 				compaction: {
 					summary: "/taskman continue",
-					firstKeptEntryId: null as any, // Keep ZERO old messages — clean slate after compaction
+					firstKeptEntryId,
 					tokensBefore,
 					details: {},
 				},
