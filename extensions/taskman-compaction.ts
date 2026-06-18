@@ -24,7 +24,7 @@ import * as path from "node:path";
 import { completeSimple } from "@earendil-works/pi-ai";
 import type { Tool, Message, ToolCall } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { convertToLlm, createReadTool, createWriteTool, createEditTool, getAgentDir, serializeConversation } from "@earendil-works/pi-coding-agent";
+import { convertToLlm, createReadTool, createWriteTool, createEditTool, createBashTool, getAgentDir, serializeConversation } from "@earendil-works/pi-coding-agent";
 
 const AGENT_DIR = getAgentDir();
 const HANDOFF_SKILL_PATH = path.join(AGENT_DIR, "skills/taskman/handoff.md");
@@ -37,7 +37,7 @@ const HANDOFF_REQUEST = `Context is getting long. Your task:
 2. Read the /handoff skill from ${HANDOFF_SKILL_PATH} and follow its instructions to save current state.
 3. Produce a final summary (text only, no tool calls) that will become the initial prompt for the next session. Preserve all user intent from this and previous sessions — goals, preferences, constraints, corrections — and use judgment as to how to frame it. Make sure to phrase it in a way which is preserved across automated handoffs.
 
-IMPORTANT: Do NOT take any action besides updating memory/handoff files. Do NOT modify source code, run commands, or make any changes to the project itself.
+IMPORTANT: Do NOT take any action besides updating memory/handoff files. Do NOT modify source code or project files. Only run commands required by the taskman skills, such as taskman sync and git rev-parse for the handoff commit.
 
 You can batch multiple tool calls.`;
 
@@ -163,7 +163,52 @@ export default function (pi: ExtensionAPI) {
 		scheduleCompaction(ctx);
 	});
 
+	let continueMessageSent = false;
+	let continueMessageTimer: ReturnType<typeof setTimeout> | undefined;
+
+	function clearContinueMessageTimer(): void {
+		if (!continueMessageTimer) return;
+		clearTimeout(continueMessageTimer);
+		continueMessageTimer = undefined;
+	}
+
+	function sendContinueMessage(deliverAs?: "followUp"): void {
+		pi.sendMessage(
+			{
+				customType: "compaction_continue",
+				content: "Load /taskman skill and /continue the task specified in the handoff.",
+				display: false,
+			},
+			{ triggerTurn: true, ...(deliverAs ? { deliverAs } : {}) },
+		);
+	}
+
+	function scheduleContinueAfterCompaction(ctx: { isIdle(): boolean; sessionManager: { getLeafId(): string | null } }, compactionEntryId: string): void {
+		if (continueMessageSent) return;
+		continueMessageSent = true;
+		clearContinueMessageTimer();
+		continueMessageTimer = setTimeout(() => {
+			continueMessageTimer = undefined;
+			try {
+				const userTurnStarted = ctx.sessionManager.getLeafId() !== compactionEntryId;
+				if (!ctx.isIdle()) {
+					sendContinueMessage("followUp");
+					return;
+				}
+				sendContinueMessage(userTurnStarted ? "followUp" : undefined);
+			} catch {
+				// Context may be stale if the user reloaded/switched sessions during compaction.
+			}
+		}, 1000);
+	}
+
+	pi.on("session_compact", (event, ctx) => {
+		scheduleContinueAfterCompaction(ctx, event.compactionEntry.id);
+	});
+
 	pi.on("session_before_compact", async (event, ctx) => {
+		continueMessageSent = false;
+		clearContinueMessageTimer();
 		const { preparation, signal, customInstructions } = event;
 		const { messagesToSummarize, turnPrefixMessages, tokensBefore, firstKeptEntryId, previousSummary, fileOps, settings } = preparation;
 
@@ -243,6 +288,7 @@ export default function (pi: ExtensionAPI) {
 			createReadTool(ctx.cwd),
 			createWriteTool(ctx.cwd),
 			createEditTool(ctx.cwd),
+			createBashTool(ctx.cwd),
 		];
 		const toolDefs: Tool[] = agentTools.map(t => ({
 			name: t.name,
