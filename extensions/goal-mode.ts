@@ -162,6 +162,8 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 	let goal: Goal | null = null;
 	let budgetLimitReported = false;
 	let compactionInProgress = false;
+	let suppressCompactionAbortPause = false;
+	let suppressCompactionAbortPauseTimer: ReturnType<typeof setTimeout> | undefined;
 	let lastCompactionEndedMs = 0;
 	let rateLimitBackoffMs = 0;
 	let debugEnabled = process.env.PI_GOAL_DEBUG === "1";
@@ -189,7 +191,9 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 	}
 
 	function shouldPauseForInterrupt(): boolean {
-		return !compactionInProgress && Date.now() - lastCompactionEndedMs > COMPACTION_INTERRUPT_GRACE_MS;
+		return !compactionInProgress &&
+			!suppressCompactionAbortPause &&
+			Date.now() - lastCompactionEndedMs > COMPACTION_INTERRUPT_GRACE_MS;
 	}
 
 	function isInterruptStopReason(reason: string): boolean {
@@ -554,6 +558,28 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 		};
 	});
 
+	function clearCompactionAbortSuppression(reason: string): void {
+		suppressCompactionAbortPause = false;
+		if (suppressCompactionAbortPauseTimer) {
+			clearTimeout(suppressCompactionAbortPauseTimer);
+			suppressCompactionAbortPauseTimer = undefined;
+		}
+		trace(`compaction-abort-suppression:end ${reason}`);
+	}
+
+	pi.events.on("taskman-compaction:abort-suppression-start", () => {
+		suppressCompactionAbortPause = true;
+		if (suppressCompactionAbortPauseTimer) clearTimeout(suppressCompactionAbortPauseTimer);
+		suppressCompactionAbortPauseTimer = setTimeout(() => {
+			clearCompactionAbortSuppression("timeout");
+		}, COMPACTION_INTERRUPT_GRACE_MS);
+		trace("compaction-abort-suppression:start");
+	});
+
+	pi.events.on("taskman-compaction:abort-suppression-end", () => {
+		clearCompactionAbortSuppression("event");
+	});
+
 	pi.on("session_before_compact", () => {
 		compactionInProgress = true;
 		trace("session_before_compact");
@@ -562,6 +588,7 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 	pi.on("session_compact", (_event, ctx) => {
 		trace("session_compact");
 		compactionInProgress = false;
+		clearCompactionAbortSuppression("session_compact");
 		lastCompactionEndedMs = Date.now();
 		if (goal && goal.status !== "complete") saveGoal(ctx);
 	});

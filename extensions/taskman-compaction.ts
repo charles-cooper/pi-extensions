@@ -119,6 +119,7 @@ export default function (pi: ExtensionAPI) {
 	function requestCompactionAfterAgent(ctx: { ui: { notify(message: string, level: "info" | "warning" | "error"): void }; abort(): void }, reason: string): void {
 		if (compactAfterCurrentAgent) return;
 		compactAfterCurrentAgent = true;
+		pi.events.emit("taskman-compaction:abort-suppression-start", { reason, timestamp: Date.now() });
 		ctx.ui.notify(`${reason}; will compact after current turn boundary`, "info");
 		ctx.abort();
 	}
@@ -133,13 +134,18 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (!ctx.isIdle()) {
 				compactionScheduled = false;
+				pi.events.emit("taskman-compaction:abort-suppression-end", { reason: "agent-did-not-become-idle", timestamp: Date.now() });
 				ctx.ui.notify("Skipped deferred compaction because agent did not become idle", "warning");
 				return;
 			}
 			ctx.compact({
-				onComplete: () => { compactionScheduled = false; },
+				onComplete: () => {
+					compactionScheduled = false;
+					pi.events.emit("taskman-compaction:abort-suppression-end", { reason: "compaction-complete", timestamp: Date.now() });
+				},
 				onError: (error) => {
 					compactionScheduled = false;
+					pi.events.emit("taskman-compaction:abort-suppression-end", { reason: "compaction-error", timestamp: Date.now() });
 					ctx.ui.notify(`Deferred compaction failed: ${error.message}`, "warning");
 				},
 			});
