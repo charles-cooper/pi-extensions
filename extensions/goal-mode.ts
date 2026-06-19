@@ -164,7 +164,6 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 	let compactionInProgress = false;
 	let suppressCompactionAbortPause = false;
 	let suppressCompactionAbortPauseTimer: ReturnType<typeof setTimeout> | undefined;
-	let lastCompactionEndedMs = 0;
 	let rateLimitBackoffMs = 0;
 	let debugEnabled = process.env.PI_GOAL_DEBUG === "1";
 	const recentEvents: string[] = [];
@@ -191,9 +190,7 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 	}
 
 	function shouldPauseForInterrupt(): boolean {
-		return !compactionInProgress &&
-			!suppressCompactionAbortPause &&
-			Date.now() - lastCompactionEndedMs > COMPACTION_INTERRUPT_GRACE_MS;
+		return !compactionInProgress && !suppressCompactionAbortPause;
 	}
 
 	function isInterruptStopReason(reason: string): boolean {
@@ -589,7 +586,6 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 		trace("session_compact");
 		compactionInProgress = false;
 		clearCompactionAbortSuppression("session_compact");
-		lastCompactionEndedMs = Date.now();
 		if (goal && goal.status !== "complete") saveGoal(ctx);
 	});
 
@@ -615,8 +611,9 @@ export default function goalModeExtension(pi: ExtensionAPI) {
 			scheduleRateLimitContinuation(delayMs, ctx);
 			return;
 		}
-		if (eventWasInterrupted(event) && shouldPauseForInterrupt()) {
-			pauseGoalForInterrupt(ctx, "agent-interrupted");
+		if (eventWasInterrupted(event)) {
+			if (shouldPauseForInterrupt()) pauseGoalForInterrupt(ctx, "agent-interrupted");
+			else trace("agent-interrupted:suppressed");
 			return;
 		}
 		sendUserTurn(buildContinuationPrompt(goal), ctx, "continuation", () => goal?.status === "active");
