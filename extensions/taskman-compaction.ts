@@ -55,6 +55,13 @@ const DEFAULT_TASKMAN_COMPACTION_SETTINGS: TaskmanCompactionSettings = {
 	reserveTokens: 16384,
 };
 
+// Intentional: taskman compaction writes durable state to .agent-files and returns
+// a breadcrumb summary. Keeping Pi's recent-message tail defeats the purpose and
+// leaves tens of thousands of tokens after compaction. Pi currently treats an
+// unmatched firstKeptEntryId as "keep no prior messages". Do not "fix" this to
+// preparation.firstKeptEntryId unless you intentionally want post-compaction bloat.
+const DROP_ALL_PRIOR_CONTEXT_AFTER_TASKMAN_HANDOFF = null as unknown as string;
+
 function readSettingsFile(filePath: string): unknown {
 	try {
 		return JSON.parse(fs.readFileSync(filePath, "utf8"));
@@ -216,7 +223,7 @@ export default function (pi: ExtensionAPI) {
 		continueMessageSent = false;
 		clearContinueMessageTimer();
 		const { preparation, signal, customInstructions } = event;
-		const { messagesToSummarize, turnPrefixMessages, tokensBefore, firstKeptEntryId, previousSummary, fileOps, settings } = preparation;
+		const { messagesToSummarize, turnPrefixMessages, tokensBefore, previousSummary, fileOps, settings } = preparation;
 
 		// Warn if reserveTokens is too low for multi-turn agent loop
 		if (settings.reserveTokens < 25000) {
@@ -251,8 +258,7 @@ export default function (pi: ExtensionAPI) {
 		// Combine messages and convert to LLM format.
 		// Framework bug workaround: custom compaction can receive an empty summarized
 		// span when the computed cut point cannot summarize a complete/split turn.
-		// In that case, summarize messages after the last compaction as fallback while
-		// still preserving Pi's prepared firstKeptEntryId boundary.
+		// In that case, summarize messages after the last compaction as fallback.
 		let allMessages = [...messagesToSummarize, ...turnPrefixMessages];
 		if (allMessages.length === 0) {
 			const { branchEntries } = event;
@@ -275,12 +281,12 @@ export default function (pi: ExtensionAPI) {
 		const conversationText = serializeConversation(llmMessages);
 
 		// If still no messages (e.g., immediate re-compaction with <3 entries),
-		// return previous summary while retaining Pi's safe recent-message boundary.
+		// return previous summary with a clean post-compaction context.
 		if (!conversationText.trim()) {
 			return {
 				compaction: {
 					summary: previousSummary || "/taskman continue",
-					firstKeptEntryId,
+					firstKeptEntryId: DROP_ALL_PRIOR_CONTEXT_AFTER_TASKMAN_HANDOFF,
 					tokensBefore,
 					details: {},
 				},
@@ -451,7 +457,7 @@ Also include:
 			return {
 				compaction: {
 					summary,
-					firstKeptEntryId,
+					firstKeptEntryId: DROP_ALL_PRIOR_CONTEXT_AFTER_TASKMAN_HANDOFF,
 					tokensBefore,
 					details: { readFiles, modifiedFiles },
 				},
@@ -466,7 +472,7 @@ Also include:
 			return {
 				compaction: {
 					summary: "/taskman continue",
-					firstKeptEntryId,
+					firstKeptEntryId: DROP_ALL_PRIOR_CONTEXT_AFTER_TASKMAN_HANDOFF,
 					tokensBefore,
 					details: {},
 				},
