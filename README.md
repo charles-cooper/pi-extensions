@@ -157,11 +157,12 @@ Replaces auto-compaction with taskman handoff format.
 
 ### Why?
 
-Default compaction uses a rigid structured format. This extension:
-- Uses the `/handoff` skill for compaction summaries
-- Produces breadcrumbs (pointers) instead of copying content
-- Integrates with taskman context (STATUS.md, MEDIUMTERM_MEM.md)
-- Keeps summaries lean with progressive disclosure
+Default compaction summarizes a selected message span and keeps a recent chat tail. This extension never uses that path; it instead automates the manual taskman flow:
+- Abort the active turn when context is near the safety threshold
+- Send a visible taskman handoff prompt into the normal conversation context
+- Let the agent use `/remember` + `/handoff` to persist durable state
+- Compact only after that handoff turn completes, dropping prior chat context
+- Send a visible taskman continue prompt for the next turn
 
 ### Usage
 
@@ -188,7 +189,7 @@ The mid-turn interrupt uses the same `compaction.enabled` and `compaction.reserv
 ```
 
 - `compaction.reserveTokens`: shared safety margin before the model context limit.
-- During streaming, taskman compaction aborts as soon as the estimated context crosses that threshold, then compacts after the agent becomes idle.
+- During streaming, taskman compaction aborts as soon as the estimated context crosses that threshold, runs a normal handoff turn, then compacts after the handoff completes.
 
 ### Requirements
 

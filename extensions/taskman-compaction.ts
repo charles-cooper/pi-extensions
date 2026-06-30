@@ -1,13 +1,14 @@
 /**
  * Taskman Compaction Extension
  *
- * Replaces the default compaction with taskman /handoff skill.
- * Runs an agent loop with read/write/edit tools so it can:
- * - Read the handoff skill
- * - Write to .agent-files/ (STATUS.md, handoff files, etc.)
- * - Produce a summary using breadcrumbs
+ * Replaces the default compaction with a taskman /handoff turn.
+ * Flow:
+ * - Abort the active agent run at a safe threshold
+ * - Send a visible handoff prompt into the normal conversation context
+ * - After the handoff turn completes, drop prior chat context
+ * - Send a visible continue prompt so the next turn resumes from taskman
  *
- * Falls back to default compaction if taskman not installed.
+ * Requires taskman; never falls back to built-in compaction.
  *
  * Usage:
  *   pi --extension ~/pi-extensions/extensions/taskman-compaction.ts
@@ -21,21 +22,23 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { completeSimple } from "@earendil-works/pi-ai";
-import type { Tool, Message, ToolCall } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { convertToLlm, createReadTool, createWriteTool, createEditTool, createBashTool, getAgentDir, serializeConversation } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 const AGENT_DIR = getAgentDir();
 const HANDOFF_SKILL_PATH = path.join(AGENT_DIR, "skills/taskman/handoff.md");
 
 const REMEMBER_SKILL_PATH = path.join(AGENT_DIR, "skills/taskman/remember.md");
 
-const HANDOFF_REQUEST = `Context is getting long. Your task:
+const HANDOFF_REQUEST = `Context is getting long. This is automated taskman compaction.
 
+Treat this exactly like the user pressed Esc, then asked you to run a taskman handoff before starting a fresh session.
+
+Your task:
 1. Read the /remember skill from ${REMEMBER_SKILL_PATH} and persist any reusable knowledge (learnings, patterns, decisions) to topics/memory files.
 2. Read the /handoff skill from ${HANDOFF_SKILL_PATH} and follow its instructions to save current state.
-3. Produce a final summary (text only, no tool calls) that will become the initial prompt for the next session. Preserve all user intent from this and previous sessions — goals, preferences, constraints, corrections — and use judgment as to how to frame it. Make sure to phrase it in a way which is preserved across automated handoffs.
+3. If the previous assistant message was empty/aborted, treat the interrupted work as unfinished unless the current conversation already contains explicit evidence it was completed or persisted.
+4. Final response: briefly state that the taskman handoff is complete. Do not continue feature work; after this turn, the extension will compact away chat context and continue from taskman.
 
 IMPORTANT: Do NOT take any action besides updating memory/handoff files. Do NOT modify source code or project files. Only run commands required by the taskman skills, such as taskman sync and git rev-parse for the handoff commit.
 
@@ -48,6 +51,14 @@ function checkTaskmanAvailable(): boolean {
 type TaskmanCompactionSettings = {
 	compactionEnabled: boolean;
 	reserveTokens: number;
+};
+
+type CompactionPhase = "idle" | "awaiting_handoff_idle" | "handoff_turn" | "awaiting_drop_compaction";
+
+type CompactionInterrupt = {
+	reason: string;
+	phase: "message_update" | "turn_end";
+	timestamp: number;
 };
 
 const DEFAULT_TASKMAN_COMPACTION_SETTINGS: TaskmanCompactionSettings = {
@@ -111,9 +122,23 @@ function assistantOutputTokens(message: unknown): number {
 	return estimateContentTokens((message as Record<string, unknown>).content);
 }
 
+function firstBranchEntryId(branchEntries: readonly unknown[]): string | undefined {
+	for (const entry of branchEntries) {
+		if (!entry || typeof entry !== "object") continue;
+		const id = (entry as Record<string, unknown>).id;
+		if (typeof id === "string") return id;
+	}
+	return undefined;
+}
+
 export default function (pi: ExtensionAPI) {
-	let compactAfterCurrentAgent = false;
-	let compactionScheduled = false;
+	let phase: CompactionPhase = "idle";
+	let scheduledAction = false;
+	let pendingInterrupt: CompactionInterrupt | undefined;
+	let completedHandoffInterrupt: CompactionInterrupt | undefined;
+	let queuedHandoffInstructions = "";
+	let continueMessageSent = false;
+	let continueMessageTimer: ReturnType<typeof setTimeout> | undefined;
 
 	function contextOverThreshold(ctx: { cwd: string; getContextUsage(): { tokens: number | null; contextWindow: number } | undefined }, extraTokens = 0): boolean {
 		const usage = ctx.getContextUsage();
@@ -123,61 +148,140 @@ export default function (pi: ExtensionAPI) {
 		return usage.tokens + extraTokens > usage.contextWindow - settings.reserveTokens;
 	}
 
-	function requestCompactionAfterAgent(ctx: { ui: { notify(message: string, level: "info" | "warning" | "error"): void }; abort(): void }, reason: string): void {
-		if (compactAfterCurrentAgent) return;
-		compactAfterCurrentAgent = true;
-		pi.events.emit("taskman-compaction:abort-suppression-start", { reason, timestamp: Date.now() });
-		ctx.ui.notify(`${reason}; will compact after current turn boundary`, "info");
+	function requestHandoffAfterAgent(ctx: { ui: { notify(message: string, level: "info" | "warning" | "error"): void }; abort(): void }, reason: string, interruptPhase: CompactionInterrupt["phase"]): void {
+		if (phase !== "idle") return;
+		const timestamp = Date.now();
+		pendingInterrupt = { reason, phase: interruptPhase, timestamp };
+		phase = "awaiting_handoff_idle";
+		pi.events.emit("taskman-compaction:abort-suppression-start", { reason, phase: interruptPhase, timestamp });
+		ctx.ui.notify(`${reason}; will run taskman handoff after current turn boundary`, "info");
 		ctx.abort();
 	}
 
-	function scheduleCompaction(ctx: { isIdle(): boolean; compact(options?: { onComplete?: () => void; onError?: (error: Error) => void }): void; ui: { notify(message: string, level: "info" | "warning" | "error"): void } }, attempt = 0): void {
-		if (compactionScheduled && attempt === 0) return;
-		compactionScheduled = true;
+	function scheduleWhenIdle(ctx: { isIdle(): boolean; ui: { notify(message: string, level: "info" | "warning" | "error"): void } }, action: () => void, skippedReason: string, attempt = 0): void {
+		if (scheduledAction && attempt === 0) return;
+		scheduledAction = true;
 		setTimeout(() => {
 			if (!ctx.isIdle() && attempt < 50) {
-				scheduleCompaction(ctx, attempt + 1);
+				scheduleWhenIdle(ctx, action, skippedReason, attempt + 1);
 				return;
 			}
 			if (!ctx.isIdle()) {
-				compactionScheduled = false;
-				pi.events.emit("taskman-compaction:abort-suppression-end", { reason: "agent-did-not-become-idle", timestamp: Date.now() });
-				ctx.ui.notify("Skipped deferred compaction because agent did not become idle", "warning");
+				scheduledAction = false;
+				phase = "idle";
+				pi.events.emit("taskman-compaction:abort-suppression-end", { reason: skippedReason, timestamp: Date.now() });
+				ctx.ui.notify("Skipped deferred taskman compaction because agent did not become idle", "warning");
 				return;
 			}
-			ctx.compact({
-				onComplete: () => {
-					compactionScheduled = false;
-					pi.events.emit("taskman-compaction:abort-suppression-end", { reason: "compaction-complete", timestamp: Date.now() });
-				},
-				onError: (error) => {
-					compactionScheduled = false;
-					pi.events.emit("taskman-compaction:abort-suppression-end", { reason: "compaction-error", timestamp: Date.now() });
-					ctx.ui.notify(`Deferred compaction failed: ${error.message}`, "warning");
-				},
-			});
+			scheduledAction = false;
+			action();
 		}, 100);
 	}
 
+	function sendHandoffMessage(extraInstructions = ""): void {
+		const interrupt = pendingInterrupt;
+		const interruptText = interrupt
+			? `\n\nCompaction interrupted the active agent run. Reason: ${interrupt.reason}. Interrupt phase: ${interrupt.phase}. Timestamp: ${new Date(interrupt.timestamp).toISOString()}.`
+			: "";
+		const instructionText = extraInstructions.trim()
+			? `\n\nUser compact instructions: ${extraInstructions.trim()}`
+			: "";
+		phase = "handoff_turn";
+		pi.sendMessage(
+			{
+				customType: "taskman_compaction_handoff",
+				content: `${HANDOFF_REQUEST}${interruptText}${instructionText}`,
+				display: true,
+			},
+			{ triggerTurn: true },
+		);
+	}
+
+	function scheduleHandoff(ctx: { isIdle(): boolean; ui: { notify(message: string, level: "info" | "warning" | "error"): void } }): void {
+		scheduleWhenIdle(ctx, () => {
+			if (!checkTaskmanAvailable()) {
+				ctx.ui.notify("taskman not available. Install: pipx install taskmanager-exe && taskman install-skills", "error");
+				phase = "idle";
+				return;
+			}
+			sendHandoffMessage();
+		}, "agent-did-not-become-idle");
+	}
+
+	function scheduleDropCompaction(ctx: { isIdle(): boolean; compact(options?: { customInstructions?: string; onComplete?: () => void; onError?: (error: Error) => void }): void; ui: { notify(message: string, level: "info" | "warning" | "error"): void } }): void {
+		scheduleWhenIdle(ctx, () => {
+			ctx.compact({
+				customInstructions: "Taskman handoff just completed in the normal conversation context. Do not summarize chat. Drop prior context and continue from taskman.",
+				onComplete: () => {
+					pi.events.emit("taskman-compaction:abort-suppression-end", { reason: "compaction-complete", timestamp: Date.now() });
+				},
+				onError: (error) => {
+					phase = "idle";
+					pi.events.emit("taskman-compaction:abort-suppression-end", { reason: "compaction-error", timestamp: Date.now() });
+					ctx.ui.notify(`Deferred taskman compaction failed: ${error.message}`, "warning");
+				},
+			});
+		}, "handoff-agent-did-not-become-idle");
+	}
+
+	pi.registerCommand("compact", {
+		description: "Run taskman handoff compaction",
+		handler: async (args, ctx) => {
+			if (!checkTaskmanAvailable()) {
+				ctx.ui.notify("taskman not available. Install: pipx install taskmanager-exe && taskman install-skills", "error");
+				return;
+			}
+			if (phase !== "idle") {
+				ctx.ui.notify("Taskman compaction is already in progress", "warning");
+				return;
+			}
+			pendingInterrupt = undefined;
+			sendHandoffMessage(args);
+		},
+	});
+
+	pi.on("input", (event, ctx) => {
+		if (event.source === "extension") return;
+		const text = event.text.trim();
+		if (text !== "/compact" && !text.startsWith("/compact ")) return;
+		if (!checkTaskmanAvailable()) {
+			ctx.ui.notify("taskman not available. Install: pipx install taskmanager-exe && taskman install-skills", "error");
+			return { action: "handled" as const };
+		}
+		if (phase !== "idle") {
+			ctx.ui.notify("Taskman compaction is already in progress", "warning");
+			return { action: "handled" as const };
+		}
+		pendingInterrupt = undefined;
+		sendHandoffMessage(text.slice("/compact".length));
+		return { action: "handled" as const };
+	});
+
 	pi.on("message_update", (event, ctx) => {
+		if (phase !== "idle") return;
 		const outputTokens = assistantOutputTokens((event as any).message);
 		if (!contextOverThreshold(ctx, outputTokens)) return;
-		requestCompactionAfterAgent(ctx, `Assistant output crossed context safety threshold`);
+		requestHandoffAfterAgent(ctx, "Assistant output crossed context safety threshold", "message_update");
 	});
 
 	pi.on("turn_end", (_event, ctx) => {
+		if (phase !== "idle") return;
 		if (!contextOverThreshold(ctx)) return;
-		requestCompactionAfterAgent(ctx, "Context is near limit at turn boundary");
+		requestHandoffAfterAgent(ctx, "Context is near limit at turn boundary", "turn_end");
 	});
 
 	pi.on("agent_end", (_event, ctx) => {
-		if (!compactAfterCurrentAgent) return;
-		compactAfterCurrentAgent = false;
-		scheduleCompaction(ctx);
+		if (phase === "awaiting_handoff_idle") {
+			scheduleHandoff(ctx);
+			return;
+		}
+		if (phase === "handoff_turn") {
+			completedHandoffInterrupt = pendingInterrupt;
+			pendingInterrupt = undefined;
+			phase = "awaiting_drop_compaction";
+			scheduleDropCompaction(ctx);
+		}
 	});
-
-	let continueMessageSent = false;
-	let continueMessageTimer: ReturnType<typeof setTimeout> | undefined;
 
 	function clearContinueMessageTimer(): void {
 		if (!continueMessageTimer) return;
@@ -190,7 +294,7 @@ export default function (pi: ExtensionAPI) {
 			{
 				customType: "compaction_continue",
 				content: "Load /taskman skill and /continue the task specified in the handoff.",
-				display: false,
+				display: true,
 			},
 			{ triggerTurn: true, ...(deliverAs ? { deliverAs } : {}) },
 		);
@@ -216,267 +320,76 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	pi.on("session_compact", (event, ctx) => {
+		const details = event.compactionEntry.details as { mode?: string } | undefined;
+		if (details?.mode === "taskman-handoff-queued") {
+			sendHandoffMessage(queuedHandoffInstructions);
+			queuedHandoffInstructions = "";
+			return;
+		}
 		scheduleContinueAfterCompaction(ctx, event.compactionEntry.id);
 	});
 
-	pi.on("session_before_compact", async (event, ctx) => {
+	pi.on("session_before_compact", (event, ctx) => {
 		continueMessageSent = false;
 		clearContinueMessageTimer();
-		const { preparation, signal, customInstructions } = event;
-		const { messagesToSummarize, turnPrefixMessages, tokensBefore, previousSummary, fileOps, settings } = preparation;
+		const { preparation } = event;
+		const { tokensBefore, fileOps, settings } = preparation;
 
-		// Warn if reserveTokens is too low for multi-turn agent loop
 		if (settings.reserveTokens < 25000) {
 			ctx.ui.notify(
 				`reserveTokens is ${settings.reserveTokens} (recommend ≥25000 for taskman compaction). Add {"compaction":{"reserveTokens":25000}} to settings.json`,
-				"warning"
+				"warning",
 			);
 		}
 
-		// Check if taskman is available
 		if (!checkTaskmanAvailable()) {
-			ctx.ui.notify(
-				"taskman not available, using default compaction. Install: pipx install taskmanager-exe && taskman install-skills",
-				"warning"
-			);
-			return; // Fall back to default
+			ctx.ui.notify("taskman not available. Install: pipx install taskmanager-exe && taskman install-skills", "error");
+			return { cancel: true };
 		}
 
-		const model = ctx.model;
-		if (!model) {
-			ctx.ui.notify("No model available for compaction, using default", "warning");
-			return;
-		}
-		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-		if (!auth.ok) {
-			ctx.ui.notify(`No API key for ${model.provider}/${model.id}, using default compaction`, "warning");
-			return;
-		}
-		const apiKey = auth.apiKey;
-		const headers = auth.headers;
-
-		// Combine messages and convert to LLM format.
-		// Framework bug workaround: custom compaction can receive an empty summarized
-		// span when the computed cut point cannot summarize a complete/split turn.
-		// In that case, summarize messages after the last compaction as fallback.
-		let allMessages = [...messagesToSummarize, ...turnPrefixMessages];
-		if (allMessages.length === 0) {
-			const { branchEntries } = event;
-			const lastCompactIdx = branchEntries.findLastIndex((e: any) => e.type === "compaction");
-			const startIdx = lastCompactIdx >= 0 ? lastCompactIdx + 1 : 0;
-			for (let i = startIdx; i < branchEntries.length; i++) {
-				const entry = branchEntries[i] as any;
-				if (entry.type === "message") {
-					allMessages.push(entry.message);
-				} else if (entry.type === "custom_message") {
-					allMessages.push({
-						role: "custom",
-						content: entry.content,
-						timestamp: entry.timestamp ?? Date.now(),
-					});
-				}
+		if (phase !== "awaiting_drop_compaction") {
+			if (phase !== "idle") {
+				return {
+					compaction: {
+						summary: "Taskman compaction is already in progress.",
+						firstKeptEntryId: firstBranchEntryId(event.branchEntries) ?? preparation.firstKeptEntryId,
+						tokensBefore,
+						details: { mode: "taskman-handoff-already-running" },
+					},
+				};
 			}
-		}
-		const llmMessages = convertToLlm(allMessages);
-		const conversationText = serializeConversation(llmMessages);
-
-		// If still no messages (e.g., immediate re-compaction with <3 entries),
-		// return previous summary with a clean post-compaction context.
-		if (!conversationText.trim()) {
+			queuedHandoffInstructions = event.customInstructions ?? "";
 			return {
 				compaction: {
-					summary: previousSummary || "/taskman continue",
-					firstKeptEntryId: DROP_ALL_PRIOR_CONTEXT_AFTER_TASKMAN_HANDOFF,
+					summary: "Taskman handoff queued. Prior context is still available until that handoff completes.",
+					firstKeptEntryId: firstBranchEntryId(event.branchEntries) ?? preparation.firstKeptEntryId,
 					tokensBefore,
-					details: {},
+					details: { mode: "taskman-handoff-queued" },
 				},
 			};
 		}
 
-		ctx.ui.notify(`Taskman compaction: ${allMessages.length} messages...`, "info");
+		phase = "idle";
+		ctx.ui.notify("Taskman handoff completed; dropping prior chat context", "info");
 
-		// Create tools - reuse pi's implementations
-		const agentTools = [
-			createReadTool(ctx.cwd),
-			createWriteTool(ctx.cwd),
-			createEditTool(ctx.cwd),
-			createBashTool(ctx.cwd),
-		];
-		const toolDefs: Tool[] = agentTools.map(t => ({
-			name: t.name,
-			description: t.description,
-			parameters: t.parameters,
-		}));
-		const toolMap = new Map(agentTools.map(t => [t.name, t]));
+		const modified = new Set([...fileOps.edited, ...fileOps.written]);
+		const readFiles = [...fileOps.read].filter(f => !modified.has(f)).sort();
+		const modifiedFiles = [...modified].sort();
+		const interrupt = completedHandoffInterrupt;
+		completedHandoffInterrupt = undefined;
 
-		// Build initial messages with handoff request
-		const previousContext = previousSummary
-			? `\n\nPrevious checkpoint for reference:\n${previousSummary}`
-			: "";
-
-		const customContext = customInstructions
-			? `\n\nUser instructions for next session:\n${customInstructions}`
-			: "";
-
-		// System prompt for the compaction agent
-		const systemPrompt = `You are a handoff agent. Run /remember and /handoff skills using tools, then produce a summary as your final response (text only, no tool calls).
-
-Your summary becomes the initial prompt for the next session. If that session compacts, your summary is all that survives.
-
-Preserve all user intent from this and previous sessions — goals, preferences, constraints, corrections — and use judgment as to how to frame it. Make sure to phrase it in a way which is preserved across automated handoffs.
-
-Also include:
-- What technical progress was made and what remains
-- Where to load context from (skill files, handoff files, topic files)
-- Breadcrumbs (file paths, commands) to reconstruct state`;
-
-		let messages: Message[] = [
-			{
-				role: "user" as const,
-				content: [{
-					type: "text" as const,
-					text: `<conversation_to_handoff>\n${conversationText}\n</conversation_to_handoff>\n\n${HANDOFF_REQUEST}${previousContext}${customContext}`,
-				}],
-				timestamp: Date.now(),
+		return {
+			compaction: {
+				summary: "Taskman handoff completed. Load /taskman skill and /continue from the handoff.",
+				firstKeptEntryId: DROP_ALL_PRIOR_CONTEXT_AFTER_TASKMAN_HANDOFF,
+				tokensBefore,
+				details: {
+					mode: "taskman-handoff-drop",
+					readFiles,
+					modifiedFiles,
+					interrupt,
+				},
 			},
-		];
-
-		// Generous limit — /remember + /handoff involve many file reads/writes,
-		// especially when there are multiple topics to persist. Each LLM turn is
-		// the real cost; tool execution is cheap.
-		const maxTurns = 30;
-		let summary = "";
-
-		try {
-			// Agent loop
-			for (let turn = 0; turn < maxTurns; turn++) {
-				if (signal.aborted) throw new Error("Compaction cancelled");
-				ctx.ui.setStatus("compaction", `✎ handoff turn ${turn + 1}/${maxTurns}…`);
-
-				const maxTokens = 32768;
-
-				const response = await completeSimple(
-					model,
-					{ systemPrompt, messages, tools: toolDefs },
-					{ apiKey, headers, maxTokens, signal, reasoning: "high" },
-				);
-
-				// Bail on errored/aborted responses before executing any tool calls
-				if (response.stopReason === "error" || response.stopReason === "aborted") {
-					throw new Error(response.errorMessage ?? `Compaction LLM failed (${response.stopReason})`);
-				}
-
-				// Check for tool calls
-				const toolCalls = response.content.filter(
-					(c): c is ToolCall => c.type === "toolCall"
-				);
-
-				if (toolCalls.length === 0) {
-					// No tool calls - extract final summary
-					summary = response.content
-						.filter((c): c is { type: "text"; text: string } => c.type === "text")
-						.map((c) => c.text)
-						.join("\n");
-					// Truncated output → fall back to default compaction rather than lose context
-					if (response.stopReason === "length") {
-						ctx.ui.notify("Compaction summary was truncated, using default", "warning");
-						return;
-					}
-					break;
-				}
-
-				// Execute all tool calls (batched, per-tool error isolation)
-				const toolResults = await Promise.all(toolCalls.map(async (tc) => {
-					const tool = toolMap.get(tc.name);
-					if (!tool) {
-						ctx.ui.notify(`⚠ compaction: unknown tool ${tc.name}`, "warning");
-						return {
-							role: "toolResult" as const,
-							toolCallId: tc.id,
-							toolName: tc.name,
-							content: [{ type: "text" as const, text: `Error: Unknown tool ${tc.name}` }],
-							isError: true,
-							timestamp: Date.now(),
-						};
-					}
-					// Surface file operations to the user
-					const filePath = tc.arguments?.path as string | undefined;
-					const cmd = tc.arguments?.command as string | undefined;
-					const label = filePath ? `${tc.name} ${filePath}` : cmd ? `bash: ${cmd}` : tc.name;
-					ctx.ui.setStatus("compaction", `✎ ${label}`);
-					ctx.ui.notify(`✎ ${label}`, "info");
-					try {
-						const result = await tool.execute(tc.id, tc.arguments, signal);
-						if (signal.aborted) throw new Error("Compaction cancelled");
-						return {
-							role: "toolResult" as const,
-							toolCallId: tc.id,
-							toolName: tc.name,
-							content: result.content,
-							isError: false,
-							timestamp: Date.now(),
-						};
-					} catch (err) {
-						if (signal.aborted) throw err;
-						const errMsg = err instanceof Error ? err.message : String(err);
-						ctx.ui.notify(`⚠ compaction ${label}: ${errMsg}`, "warning");
-						return {
-							role: "toolResult" as const,
-							toolCallId: tc.id,
-							toolName: tc.name,
-							content: [{ type: "text" as const, text: `Error: ${errMsg}` }],
-							isError: true,
-							timestamp: Date.now(),
-						};
-					}
-				}));
-
-				if (signal.aborted) throw new Error("Compaction cancelled");
-
-				// Add assistant response and tool results to messages.
-				// Spread response to preserve metadata (model, provider, api) for isSameModel checks.
-				messages = [
-					...messages,
-					{ ...response } as Message,
-					...toolResults,
-				];
-			}
-
-			ctx.ui.setStatus("compaction", undefined);
-
-			if (!summary.trim()) {
-				ctx.ui.notify("Compaction agent produced empty summary", "warning");
-				summary = "/taskman continue";
-			}
-
-			// Compute file lists from preparation's fileOps for continuity with default compaction
-			const modified = new Set([...fileOps.edited, ...fileOps.written]);
-			const readFiles = [...fileOps.read].filter(f => !modified.has(f)).sort();
-			const modifiedFiles = [...modified].sort();
-
-			return {
-				compaction: {
-					summary,
-					firstKeptEntryId: DROP_ALL_PRIOR_CONTEXT_AFTER_TASKMAN_HANDOFF,
-					tokensBefore,
-					details: { readFiles, modifiedFiles },
-				},
-			};
-		} catch (error) {
-			ctx.ui.setStatus("compaction", undefined);
-			if (signal.aborted) return { cancel: true };
-			const message = error instanceof Error ? error.message : String(error);
-			ctx.ui.notify(`Taskman compaction failed: ${message}`, "error");
-
-			// Never fall back to default — return minimal summary to keep context clean
-			return {
-				compaction: {
-					summary: "/taskman continue",
-					firstKeptEntryId: DROP_ALL_PRIOR_CONTEXT_AFTER_TASKMAN_HANDOFF,
-					tokensBefore,
-					details: {},
-				},
-			};
-		}
+		};
 	});
 }
