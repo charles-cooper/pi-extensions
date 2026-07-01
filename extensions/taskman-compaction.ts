@@ -322,8 +322,10 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_compact", (event, ctx) => {
 		const details = event.compactionEntry.details as { mode?: string } | undefined;
 		if (details?.mode === "taskman-handoff-queued") {
-			sendHandoffMessage(queuedHandoffInstructions);
-			queuedHandoffInstructions = "";
+			scheduleWhenIdle(ctx, () => {
+				sendHandoffMessage(queuedHandoffInstructions);
+				queuedHandoffInstructions = "";
+			}, "queued-handoff-did-not-become-idle");
 			return;
 		}
 		scheduleContinueAfterCompaction(ctx, event.compactionEntry.id);
@@ -349,16 +351,13 @@ export default function (pi: ExtensionAPI) {
 
 		if (phase !== "awaiting_drop_compaction") {
 			if (phase !== "idle") {
-				return {
-					compaction: {
-						summary: "Taskman compaction is already in progress.",
-						firstKeptEntryId: firstBranchEntryId(event.branchEntries) ?? preparation.firstKeptEntryId,
-						tokensBefore,
-						details: { mode: "taskman-handoff-already-running" },
-					},
-				};
+				// Pi may try its own auto-compaction between our interrupt/handoff/drop phases.
+				// Cancel it quietly; creating any compaction entry here makes the later real
+				// taskman drop fail with "Already compacted".
+				return { cancel: true };
 			}
 			queuedHandoffInstructions = event.customInstructions ?? "";
+			phase = "awaiting_handoff_idle";
 			return {
 				compaction: {
 					summary: "Taskman handoff queued. Prior context is still available until that handoff completes.",
